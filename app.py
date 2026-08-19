@@ -392,7 +392,7 @@ def expand_menu_section(page: Page, name: str, child_name: str | None = None) ->
     raise RuntimeError(f"未找到一级菜单或无法展开: {name}")
 
 
-def apply_date_filters(filter_table, start: str, end: str) -> bool:
+def apply_date_filters(filter_table, start: str, end: str, before_search=None) -> bool:
     """Apply the first/last date fields without assuming mixed input indexes."""
     checkboxes = filter_table.locator("input[type='checkbox']:visible")
     text_candidates = filter_table.locator("input:not([type='checkbox']):visible")
@@ -454,12 +454,14 @@ def apply_date_filters(filter_table, start: str, end: str) -> bool:
         date_input.press("Enter")
     search = filter_table.get_by_role("button", name="搜索")
     if search.count():
+        if before_search is not None:
+            before_search()
         search.click()
         return True
     return False
 
 
-def apply_sale_date_filters(filter_table, start: str, end: str) -> bool:
+def apply_sale_date_filters(filter_table, start: str, end: str, before_search=None) -> bool:
     """Use the stable sales-page checkbox/input pairs from the ERP layout."""
     inputs = filter_table.locator("input:visible")
     if inputs.count() < 8:
@@ -478,6 +480,8 @@ def apply_sale_date_filters(filter_table, start: str, end: str) -> bool:
         date_input.press("Enter")
     search = filter_table.get_by_role("button", name="搜索")
     if search.count():
+        if before_search is not None:
+            before_search()
         search.click()
         return True
     return False
@@ -669,9 +673,12 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
     sale_total_pages = 0
     sale_total_rows = 0
     sale_page_size = 0
+    capture_sale_enabled = False
 
     def capture_sale_response(response):
         nonlocal sale_total_pages, sale_total_rows, sale_page_size
+        if not capture_sale_enabled:
+            return
         if "erp.bfcgj.com" not in response.url:
             return
         try:
@@ -690,6 +697,14 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
             sale_total_rows = max(sale_total_rows, int(block.get("totalRows") or 0))
             sale_page_size = max(sale_page_size, int(block.get("pageRows") or len(rows)))
 
+    def begin_sale_capture():
+        nonlocal capture_sale_enabled, sale_total_pages, sale_total_rows, sale_page_size
+        sale_page_rows.clear()
+        sale_page_batches.clear()
+        sale_page_signatures.clear()
+        sale_total_pages = sale_total_rows = sale_page_size = 0
+        capture_sale_enabled = True
+
     page.on("response", capture_sale_response)
     output: list[SaleRow] = []
     detail_failures: list[str] = []
@@ -698,7 +713,15 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
     try:
         filter_tables = page.locator("table.yc-view-free-table:visible")
         filter_table = filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
-        if not apply_sale_date_filters(filter_table, start, end):
+        # Ignore any delayed default-list response emitted while the desk was
+        # opening. Only responses triggered by the requested filter/pagination
+        # are allowed into the page buffers.
+        sale_page_rows.clear()
+        sale_page_batches.clear()
+        sale_page_signatures.clear()
+        sale_total_pages = sale_total_rows = sale_page_size = 0
+        capture_sale_enabled = False
+        if not apply_sale_date_filters(filter_table, start, end, begin_sale_capture):
             raise RuntimeError(f"{sale_type}日期筛选未成功执行，已停止导出")
         log(f"{sale_type}: 已提交销售日期筛选 {start} 至 {end}")
         deadline = time.monotonic() + 10
@@ -707,10 +730,13 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
         if not sale_page_batches:
             raise RuntimeError(f"未捕获{sale_type} data_list 响应，已停止导出")
         sale_page_rows[0] = sale_page_batches[0]
+        expected_pages = 0
+        if sale_total_rows and sale_page_size:
+            expected_pages = (sale_total_rows + sale_page_size - 1) // sale_page_size
+        effective_total_pages = max(sale_total_pages, expected_pages)
         if sale_total_pages:
             log(f"{sale_type}: 接口共 {sale_total_pages} 页")
-        if sale_total_rows > len(sale_page_batches[0]):
-            expected_pages = (sale_total_rows + max(sale_page_size, 1) - 1) // max(sale_page_size, 1)
+        if expected_pages and expected_pages != sale_total_pages:
             log(f"{sale_type}: 接口共 {sale_total_rows} 条，预计 {expected_pages} 页")
 
         while True:
@@ -733,6 +759,8 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                     skipped_payment_count += 1
                     continue
                 material = recovery_no = remark = tax = ""
+                amount = weight = ""
+                detail_succeeded = False
                 close = None
                 capture_detail_response = None
                 try:
@@ -788,6 +816,7 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                     master_amount, master_tax, remark = sale_master_api_summary(master_response_rows)
                     amount = master_amount or calculated_amount
                     tax = master_tax if numeric_value(master_tax) not in (None, 0.0) else detail_tax
+                    detail_succeeded = True
                     log(f"{sale_type}: 已读取销售单 {sale_no} 详情")
                     if pdf_dir is not None:
                         pdf_path = pdf_dir / f"{safe_filename(sale_type)}-{safe_filename(sale_date)}-{safe_filename(sale_no)}.pdf"
@@ -799,7 +828,7 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                             log(f"未生成票据 PDF: {pdf_path.name}")
                 except (RuntimeError, PlaywrightTimeoutError, PlaywrightError, IndexError, OSError) as exc:
                     detail_failures.append(sale_no)
-                    log(f"详情读取失败，已保留主表行 {sale_no}: {exc}")
+                    log(f"详情读取失败，已跳过销售单 {sale_no}: {exc}")
                 finally:
                     if capture_detail_response is not None:
                         remove_response_listener(page, capture_detail_response)
@@ -809,12 +838,13 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                             page.wait_for_timeout(300)
                     except PlaywrightError:
                         log(f"详情关闭失败: {sale_no}")
-                output.append(SaleRow(sale_type, sale_no, sale_date, payment_date, material, recovery_no, amount, tax, weight, remark))
+                if detail_succeeded:
+                    output.append(SaleRow(sale_type, sale_no, sale_date, payment_date, material, recovery_no, amount, tax, weight, remark))
 
             # The API's page count is authoritative. Do not click the next
             # button after the final page, where no new data_list response can
             # arrive and the old timeout misleadingly reports a missing page.
-            if sale_total_pages and page_no >= sale_total_pages:
+            if effective_total_pages and page_no >= effective_total_pages:
                 break
             target_page = str(page_no + 1)
             page_links = page.locator("li.paging-item:visible")
@@ -906,9 +936,12 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
     total_pages = 0
     total_rows = 0
     page_size = 0
+    capture_enabled = False
 
     def capture_response(response):
         nonlocal response_count, total_pages, total_rows, page_size
+        if not capture_enabled:
+            return
         if "erp.bfcgj.com" not in response.url:
             return
         try:
@@ -927,16 +960,21 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
                 total_pages = (total_rows + page_size - 1) // page_size
             response_count += 1
 
-    def wait_for_response(previous_count: int, timeout: float = 10, phase: str = "翻页") -> bool:
+    def wait_for_response(previous_count: int, timeout: float = 10, phase: str = "翻页") -> None:
         deadline = time.monotonic() + timeout
         while response_count <= previous_count and time.monotonic() < deadline:
             page.wait_for_timeout(200)
         if response_count <= previous_count:
-            if response_rows:
-                log(f"{form_name}: {phase}未产生新的 vc_bill_list 响应，沿用已捕获数据")
-                return False
             raise RuntimeError(f"{form_name}: {phase}未捕获 vc_bill_list 响应")
-        return True
+
+    def begin_filtered_capture():
+        nonlocal capture_enabled, response_count, total_pages, total_rows, page_size
+        response_rows.clear()
+        response_count = 0
+        total_pages = 0
+        total_rows = 0
+        page_size = 0
+        capture_enabled = True
 
     page.on("response", capture_response)
     try:
@@ -952,15 +990,19 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
         total_pages = 0
         total_rows = 0
         page_size = 0
+        capture_enabled = False
         before_search = response_count
-        if apply_date_filters(filter_table, start, end):
+        if apply_date_filters(filter_table, start, end, begin_filtered_capture):
             wait_for_response(before_search, phase="日期筛选")
         else:
             search = filter_table.get_by_role("button", name="搜索")
             if search.count():
+                begin_filtered_capture()
                 before_search = response_count
                 search.click()
                 wait_for_response(before_search, phase="搜索")
+            else:
+                raise RuntimeError(f"{form_name}: 未找到搜索按钮")
         page_no = 1
         while True:
             log(f"{form_name}: 正在读取第 {page_no} 页")
@@ -1154,7 +1196,7 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
     return headers, rows_out
 
 
-def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: Path | None = None, selected_forms: list[str] | None = None, save_excel: bool = True) -> tuple[int, int]:
+def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: Path | None = None, selected_forms: list[str] | None = None, save_excel: bool = True) -> tuple[int, int, bool]:
     if save_excel:
         output.parent.mkdir(parents=True, exist_ok=True)
     if pdf_dir is not None:
@@ -1202,11 +1244,12 @@ def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: P
             log(f"正在生成 Excel: {output}")
             export_report(rows, form_sheets, output)
             log(f"Excel 已生成: {output}")
+        excel_generated = bool(save_excel and (rows or form_sheets) and output.exists())
         form_row_count = sum(len(rows_data) for _, rows_data in form_sheets.values()) if selected_forms else 0
         total_count = len(rows) + form_row_count
         pdf_count = len(generated_pdfs)
         log(f"完成，共读取 {total_count} 条（销售 {len(rows)} 条，凭证 {form_row_count} 条）；实际生成 {pdf_count} 个 PDF")
-        return total_count, pdf_count
+        return total_count, pdf_count, excel_generated
 
 
 class App(tk.Tk):
@@ -1514,18 +1557,18 @@ class App(tk.Tk):
 
     def worker(self, selected, selected_forms, start, end, output, pdf_dir, save_excel):
         try:
-            row_count, pdf_count = run(start, end, output, selected, self.log, pdf_dir, selected_forms, save_excel)
+            row_count, pdf_count, excel_generated = run(start, end, output, selected, self.log, pdf_dir, selected_forms, save_excel)
             outputs = [f"共读取 {row_count} 条数据"]
-            outputs.append("已生成 1 个 Excel" if save_excel else "未生成 Excel")
+            outputs.append("已生成 1 个 Excel" if excel_generated else "未生成 Excel")
             outputs.append(f"已生成 {pdf_count} 个 PDF" if pdf_dir is not None else "未生成 PDF")
             message = "；".join(outputs) + "。"
             self.log(f"完成: {message}")
-            self.log(f"统计: 实际读取 {row_count} 条，Excel {'1' if save_excel else '0'} 个，PDF {pdf_count if pdf_dir is not None else '0'} 个")
-            if save_excel:
+            self.log(f"统计: 实际读取 {row_count} 条，Excel {'1' if excel_generated else '0'} 个，PDF {pdf_count if pdf_dir is not None else '0'} 个")
+            if excel_generated:
                 self.log(f"Excel 文件: {output}")
             if pdf_dir is not None:
                 self.log(f"PDF 目录: {pdf_dir}")
-            open_path = output.parent if save_excel else pdf_dir
+            open_path = output.parent if excel_generated else pdf_dir
             if open_path is not None:
                 self.after(0, lambda path=open_path: open_output_directory(path))
             self.after(0, lambda text=message: messagebox.showinfo("完成", text))
