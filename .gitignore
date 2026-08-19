@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.facas-edge-profile/
+
+# Local runtime state and generated output
+facas-run.log
+facas-settings.json
+print.har
+销售单据PDF/
+销售数据*.xlsx
+~$*.xlsx
+*.print-response.txt
+*.print-page.html
