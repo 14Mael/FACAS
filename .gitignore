@@ -6,6 +6,8 @@ __pycache__/
 facas-run.log
 facas-settings.json
 print.har
+log/
+output/
 销售单据PDF/
 销售数据*.xlsx
 ~$*.xlsx

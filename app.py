@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import base64
 import calendar
-import ctypes
 import json
+import os
 import queue
 import re
 import socket
@@ -14,14 +14,13 @@ import time
 import traceback
 import tkinter as tk
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
-from pywinauto import Desktop, keyboard
 
 
 MODULES = {
@@ -66,6 +65,13 @@ def safe_filename(value: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", clean(value))
 
 
+def open_output_directory(path: Path) -> None:
+    """Open a generated output directory in Windows Explorer."""
+    directory = path if path.is_dir() else path.parent
+    if directory.exists():
+        os.startfile(str(directory))
+
+
 def start_debug_edge() -> None:
     """Open a visible Edge window with a persistent automation profile."""
     edge_paths = (
@@ -102,100 +108,6 @@ def live_erp_page(browser):
     if not pages:
         raise RuntimeError("未找到仍然打开的 ERP 页面，请保持专用 Edge 和 ERP 页面打开")
     return pages[-1]
-
-
-def copy_to_clipboard(value: str) -> None:
-    """Put Unicode text on the Windows clipboard for native save dialogs."""
-    data = (value + "\0").encode("utf-16-le")
-    kernel32 = ctypes.windll.kernel32
-    user32 = ctypes.windll.user32
-    kernel32.GlobalAlloc.argtypes = (ctypes.c_uint, ctypes.c_size_t)
-    kernel32.GlobalAlloc.restype = ctypes.c_void_p
-    kernel32.GlobalLock.argtypes = (ctypes.c_void_p,)
-    kernel32.GlobalLock.restype = ctypes.c_void_p
-    kernel32.GlobalUnlock.argtypes = (ctypes.c_void_p,)
-    kernel32.GlobalFree.argtypes = (ctypes.c_void_p,)
-    user32.OpenClipboard.argtypes = (ctypes.c_void_p,)
-    user32.SetClipboardData.argtypes = (ctypes.c_uint, ctypes.c_void_p)
-    user32.SetClipboardData.restype = ctypes.c_void_p
-    global_memory = kernel32.GlobalAlloc(0x0002, len(data))
-    if not global_memory:
-        raise RuntimeError("无法分配 Windows 剪贴板内存")
-    pointer = kernel32.GlobalLock(global_memory)
-    if not pointer:
-        kernel32.GlobalFree(global_memory)
-        raise RuntimeError("无法锁定 Windows 剪贴板内存")
-    ctypes.memmove(pointer, data, len(data))
-    kernel32.GlobalUnlock(global_memory)
-    if not user32.OpenClipboard(None):
-        raise RuntimeError("无法打开 Windows 剪贴板")
-    try:
-        user32.EmptyClipboard()
-        if not user32.SetClipboardData(13, global_memory):  # CF_UNICODETEXT
-            raise RuntimeError("无法写入 Windows 剪贴板")
-        global_memory = None  # Clipboard now owns this handle.
-    finally:
-        user32.CloseClipboard()
-        if global_memory:
-            kernel32.GlobalFree(global_memory)
-
-
-def save_print_dialog_pdf(path: Path) -> None:
-    """Fill the Windows 'Save Print Output As' dialog from Microsoft Print to PDF."""
-    desktop = Desktop(backend="uia")
-    desktop_win32 = Desktop(backend="win32")
-    dialog = None
-    deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        for candidate_desktop in (desktop, desktop_win32):
-            for window in candidate_desktop.windows():
-                if not window.is_visible():
-                    continue
-                try:
-                    title = window.window_text().lower()
-                    is_save_dialog = any(token in title for token in ("save", "另存", "保存"))
-                    has_filename = window.child_window(auto_id="FileNameControl", control_type="ComboBox").exists(timeout=0.1)
-                    if is_save_dialog or has_filename:
-                        dialog = window
-                        break
-                except Exception:
-                    continue
-            if dialog is not None:
-                break
-        if dialog is not None:
-            break
-        time.sleep(0.2)
-    if dialog is None:
-        # The ERP's LODOP dialog can deny UI Automation access. Its filename
-        # field receives initial focus, so use clipboard paste on the active
-        # native dialog without inspecting its controls.
-        copy_to_clipboard(str(path))
-        keyboard.send_keys("^a")
-        keyboard.send_keys("^v")
-        keyboard.send_keys("{ENTER}")
-        return
-
-    dialog.set_focus()
-    try:
-        filename = dialog.child_window(auto_id="FileNameControl", control_type="ComboBox")
-        edit = filename.child_window(control_type="Edit")
-        if edit.exists(timeout=1):
-            edit.set_edit_text(str(path))
-        else:
-            filename.set_edit_text(str(path))
-        save_button = dialog.child_window(title_re=".*(保存|Save).*", control_type="Button")
-        save_button.click()
-    except Exception:
-        # Traditional Win32 print dialogs may not expose UIA identifiers.
-        keyboard.send_keys("^a")
-        keyboard.send_keys(str(path), with_spaces=True)
-        keyboard.send_keys("{ENTER}")
-    try:
-        confirm = desktop.window(title_re=".*(确认另存为|Confirm Save As|确认保存).*", visible_only=True)
-        confirm.wait("visible", timeout=2)
-        confirm.child_window(title_re="^(是|Yes)$", control_type="Button").click()
-    except Exception:
-        pass
 
 
 def save_page_pdf_fallback(page: Page, path: Path) -> None:
@@ -262,7 +174,9 @@ def page_print_markup(page: Page, expected_values: list[str] | None = None) -> s
                         best_score = score
                 except Exception:
                     continue
-        if best_markup is not None and (not expected or best_score > 0):
+        # Never accept a zero-match frame: it may be the hidden print frame
+        # left behind by the previous bill.
+        if best_markup is not None and expected and best_score > 0:
             return best_markup
         time.sleep(0.2)
     return None
@@ -344,12 +258,22 @@ def save_printbill_pdf(page: Page, path: Path, log) -> bool:
         except Exception:
             payload = body
         expected_values = print_payload_values(payload)
+        business_values = sorted({
+            value for value in expected_values
+            if re.search(r"\$[A-Z0-9]{6,}", value)
+        }, key=len, reverse=True)
+        if not business_values:
+            log("PrintBill 响应未包含当前单据业务标识，拒绝使用旧打印页面")
+            business_values = []
         # The response often contains only the fixed template. Prefer the
         # fully populated #bill1 rendered by the ERP print iframe.
-        markup = page_print_markup(page, expected_values)
+        markup = page_print_markup(page, business_values)
         if not markup:
             response_markup = find_print_markup(payload)
-            if response_markup and any(value in response_markup for value in expected_values):
+            # A static template without the current bill number is not enough:
+            # rendering it would create a valid-looking but stale/empty PDF.
+            if response_markup and business_values and any(
+                    value in response_markup for value in business_values):
                 markup = response_markup
         if not markup:
             debug_path = path.with_suffix(".print-response.txt")
@@ -371,60 +295,37 @@ def save_printbill_pdf(page: Page, path: Path, log) -> bool:
         return False
 
 
-def detail_summary(page: Page) -> tuple[str, str, str, str]:
-    """Read only the first detail row in the open bill."""
-    # Detail tables are identified by their header, not by global table order.
-    candidates = page.locator("table.yc-view-grid-table")
-    table = None
-    for i in range(candidates.count()):
-        candidate = candidates.nth(i)
-        if (candidate.is_visible()
-                and candidate.locator("tr").first.locator("td").count() >= 15):
-            table = candidate
-            break
-    if table is None:
-        return "", "", "", ""
-    table.wait_for(state="visible", timeout=10000)
-    rows = table.locator("tr")
-    if not rows.count():
-        rows = table.locator("tr").nth(1)
-    if not rows.count():
-        return "", "", "", ""
-    cells = rows.first.locator("td")
-    values = [clean(cells.nth(i).inner_text()) for i in range(cells.count())]
-    amount_total = 0.0
-    tax_total = 0.0
-    for row in rows.all():
-        cells = row.locator("td")
-        vals = [clean(cells.nth(i).inner_text()) for i in range(cells.count())]
-        try:
-            amount_total += float(vals[11].replace(",", ""))
-        except (ValueError, IndexError):
-            pass
-        try:
-            tax_total += float(vals[12].replace(",", ""))
-        except (ValueError, IndexError):
-            pass
-    return (
-        values[1] if len(values) > 1 else "",
-        values[2] if len(values) > 2 else "",
-        f"{amount_total:,.2f}" if amount_total else "",
-        f"{tax_total:,.2f}" if tax_total else "",
-    )
-
-
-def data_grid(page: Page):
-    """The ERP renders a header grid, a data grid, and a subtotal grid."""
+def data_grid(page: Page, expected_markers: tuple[str, ...] = ()):
+    """Return the visible ERP list grid matching its business headers."""
     grids = page.locator("table.yc-view-grid-table")
+    header_markers = ("销售单号", "票据号码", "单据日期", "客户名称", "对方单位")
+    candidates: list[tuple[int, object]] = []
     for i in range(grids.count()):
         grid = grids.nth(i)
-        if (grid.is_visible() and grid.locator("tr").count() >= 1
-                and grid.locator("tr").first.locator("td").count() >= 8):
-            return grid
-    for i in range(grids.count()):
-        if grids.nth(i).is_visible():
-            return grids.nth(i)
-    return grids.last
+        try:
+            if not grid.is_visible():
+                continue
+            text = clean(grid.inner_text())
+            marker_count = sum(marker in text for marker in header_markers)
+            expected_count = sum(marker in text for marker in expected_markers)
+            record_count = len(re.findall(r"\$[A-Z]{2}\d{6,}|20\d{2}-\d{2}-\d{2}", text))
+            data_rows = grid.locator("tbody tr").count() or grid.locator("tr").count()
+            has_action = grid.get_by_text("查看", exact=True).count() > 0
+            subtotal_penalty = 20 if any(label in text for label in ("本页小计", "合计")) else 0
+            if data_rows and (marker_count or record_count):
+                # ERP separates the header and body into different tables.
+                # Real records must outweigh header-marker matches, otherwise
+                # an empty header table wins and detail rows cannot be opened.
+                score = (record_count * 50 + expected_count * 20
+                         + marker_count * 5 + data_rows + int(has_action) * 3
+                         - subtotal_penalty)
+                candidates.append((score, grid))
+        except PlaywrightError:
+            continue
+    if candidates:
+        return max(candidates, key=lambda item: item[0])[1]
+    expected_text = "、".join(expected_markers) if expected_markers else "销售单号或票据号码"
+    raise RuntimeError(f"未识别到包含{expected_text}的数据表格")
 
 
 def click_visible_menu_item(page: Page, name: str) -> None:
@@ -580,73 +481,159 @@ def apply_sale_date_filters(filter_table, start: str, end: str) -> bool:
         search.click()
         return True
     return False
-    # Identify the two sales-date controls by their actual labels. Do not use
-    # generic "日期" matching: 回收单号 may contain a date value as well.
-    date_controls = []
-    containers = filter_table.locator("td:visible")
-    if not containers.count():
-        containers = filter_table.locator("tr:visible")
-    label_specs = (("销售日期从", start), ("销售日期到", end))
-    for label, value in label_specs:
-        found = False
-        for index in range(containers.count()):
-            container = containers.nth(index)
-            text = clean(container.inner_text())
-            if label not in text:
-                continue
-            row_checkbox = container.locator("input[type='checkbox']:visible")
-            row_input = container.locator("input:not([type='checkbox']):visible")
-            if row_checkbox.count() and row_input.count():
-                date_controls.append((row_checkbox.first, row_input.first, value))
-                found = True
-                break
-        if not found:
-            return False
-    # Clear every existing condition, then enable only the two date rows.
-    for index in range(checkboxes.count()):
-        checkbox = checkboxes.nth(index)
-        if checkbox.is_checked():
-            checkbox.uncheck()
-    for checkbox, date_input, value in date_controls:
-        if not checkbox.is_checked():
-            checkbox.check()
-        date_input.fill(value)
-        date_input.press("Enter")
-    # Some ERP controls re-render after date input and restore their previous
-    # state. Re-check every visible checkbox and leave only the two date ones.
-    date_boxes = []
-    for checkbox, _, _ in date_controls:
-        box = checkbox.bounding_box()
-        if box:
-            date_boxes.append((round(box["x"]), round(box["y"])))
-    for index in range(checkboxes.count()):
-        checkbox = checkboxes.nth(index)
-        box = checkbox.bounding_box()
-        position = (round(box["x"]), round(box["y"])) if box else None
-        if position not in date_boxes and checkbox.is_checked():
-            checkbox.uncheck()
-    search = filter_table.get_by_role("button", name="搜索")
-    if search.count():
-        search.click()
-        return True
-    return False
 
 
-def find_voucher_rows(value):
-    """Find vc_bill_list rows inside an ERP response payload."""
+def remove_response_listener(page: Page, callback) -> None:
+    """Release a response callback even when the ERP page is closing."""
+    try:
+        page.remove_listener("response", callback)
+    except PlaywrightError:
+        pass
+
+
+def find_named_blocks(value, name: str, module: str | None = None) -> list[dict]:
+    """Return every named ERP response block, optionally for one module."""
+    found: list[dict] = []
     if isinstance(value, dict):
-        if isinstance(value.get("rowsData"), list) and value.get("name") == "vc_bill_list":
-            return value["rowsData"]
+        if (value.get("name") == name and isinstance(value.get("rowsData"), list)
+                and (module is None or value.get("_amn") == module)):
+            found.append(value)
         for child in value.values():
-            found = find_voucher_rows(child)
-            if found is not None:
-                return found
+            found.extend(find_named_blocks(child, name, module))
     elif isinstance(value, list):
         for child in value:
-            found = find_voucher_rows(child)
-            if found is not None:
-                return found
-    return None
+            found.extend(find_named_blocks(child, name, module))
+    return found
+
+
+DETAIL_FIELD_MAP = {
+    # Fields confirmed from the ERP's bfc_sale_local_bill data_d response.
+    "现场销售": {
+        "material": "c14", "recovery_no": "c3", "amount": "c12",
+        "tax": "c17", "weight": "c16",
+    },
+    # Fields confirmed from the ERP's bfc_sale_bill data_d response.
+    "库房销售": {
+        "material": "c12", "recovery_no": None, "amount": "c10",
+        "tax": "c15", "weight": "c26",
+    },
+    "拆解料销售": {
+        "material": "c14", "recovery_no": None, "amount": "c12",
+        "tax": "c17", "weight": "c16",
+    },
+}
+
+
+def numeric_value(value) -> float | None:
+    """Convert ERP numeric fields while treating blanks as absent values."""
+    if value is None or clean(str(value)) == "":
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def format_amount(value: float | None) -> str:
+    return f"{value:,.2f}" if value is not None else ""
+
+
+def erp_date(value) -> str:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000).strftime("%Y-%m-%d")
+    return clean(str(value or ""))
+
+
+SALE_LIST_FIELD_MAP = {
+    "现场销售": {
+        "sale_no": "c0", "sale_date": "c4", "payment_date": "c9",
+        "customer": "c3", "amount": "c5", "weight": "c16",
+    },
+    "库房销售": {
+        "sale_no": "c0", "sale_date": "c4", "payment_date": "c5",
+        "customer": "c3", "amount": "c6", "weight": "c15",
+    },
+    "拆解料销售": {
+        "sale_no": "c0", "sale_date": "c4", "payment_date": "c9",
+        "customer": "c3", "amount": "c5", "weight": "c15",
+    },
+}
+
+
+def sale_list_row(sale_type: str, row: dict) -> tuple[str, str, str, str, str, str]:
+    """Map the ERP data_list response for the selected sales desk."""
+    fields = SALE_LIST_FIELD_MAP[sale_type]
+    return (
+        clean(str(row.get(fields["sale_no"]) or "")),
+        erp_date(row.get(fields["sale_date"])),
+        erp_date(row.get(fields["payment_date"])),
+        clean(str(row.get(fields["customer"]) or "")),
+        format_amount(numeric_value(row.get(fields["amount"]))),
+        format_amount(numeric_value(row.get(fields["weight"]))),
+    )
+
+
+def click_sale_detail(page: Page, sale_no: str) -> None:
+    """Open a visible list row by the API-provided bill number."""
+    matches = page.get_by_text(sale_no, exact=True)
+    for index in range(matches.count()):
+        bill_cell = matches.nth(index)
+        try:
+            if not bill_cell.is_visible():
+                continue
+            row = bill_cell.locator("xpath=ancestor::tr[1]")
+            view = row.get_by_text("查看", exact=True)
+            if view.count() and view.is_visible():
+                view.click()
+                return
+        except PlaywrightError:
+            continue
+    raise RuntimeError(f"页面中未找到销售单 {sale_no} 的查看操作")
+
+
+def detail_api_summary(sale_type: str, rows: list[dict]) -> tuple[str, str, str, str, str]:
+    """Read the first item and aggregate numeric detail fields from data_d."""
+    fields = DETAIL_FIELD_MAP[sale_type]
+    material = ""
+    recovery_no = ""
+    amount_total = tax_total = weight_total = 0.0
+    amount_seen = tax_seen = weight_seen = False
+    for row in rows:
+        if not material:
+            material = clean(str(row.get(fields["material"]) or ""))
+        if not recovery_no and fields["recovery_no"]:
+            recovery_no = clean(str(row.get(fields["recovery_no"]) or ""))
+        amount = numeric_value(row.get(fields["amount"]))
+        tax = numeric_value(row.get(fields["tax"]))
+        weight = numeric_value(row.get(fields["weight"]))
+        if amount is not None:
+            amount_total += amount
+            amount_seen = True
+        if tax is not None:
+            tax_total += tax
+            tax_seen = True
+        if weight is not None:
+            weight_total += weight
+            weight_seen = True
+    return (
+        material,
+        recovery_no,
+        format_amount(amount_total if amount_seen else None),
+        format_amount(tax_total if tax_seen else None),
+        format_amount(weight_total if weight_seen else None),
+    )
+
+
+def sale_master_api_summary(rows: list[dict]) -> tuple[str, str, str]:
+    """Read totals, tax total, and remark from a sales data_m response."""
+    if not rows:
+        return "", "", ""
+    row = rows[0]
+    return (
+        format_amount(numeric_value(row.get("c13"))),
+        format_amount(numeric_value(row.get("c14"))),
+        clean(str(row.get("c9") or "")),
+    )
 
 
 def voucher_value(row: dict, header: str) -> str:
@@ -668,112 +655,207 @@ def voucher_value(row: dict, header: str) -> str:
 
 def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                   pdf_dir: Path | None = None, generated_pdfs: set[Path] | None = None) -> list[SaleRow]:
-    # The menu contains both a navigation item and a tab. Clicking the first
-    # exact text item follows the same route as a normal user click.
     if page.is_closed():
         raise RuntimeError("ERP 页面已关闭，请重新登录专用 Edge")
+    log(f"{sale_type}: 正在打开销售列表")
     expand_menu_section(page, "销售管理", sale_type)
     click_visible_menu_item(page, sale_type)
     page.wait_for_timeout(500)
-    table = data_grid(page)
-    table.wait_for(state="visible", timeout=15000)
+    data_grid(page, ("销售单号",)).wait_for(state="visible", timeout=15000)
 
-    # Prototype date filtering: fill the two date controls and enable their
-    # adjacent checkboxes. The application then performs the normal search.
-    filter_tables = page.locator("table.yc-view-free-table:visible")
-    filter_table = filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
-    if apply_sale_date_filters(filter_table, start, end):
-        page.wait_for_timeout(1000)
+    sale_page_rows: dict[int, list[dict]] = {}
+    sale_page_batches: list[list[dict]] = []
+    sale_page_signatures: set[tuple[str, ...]] = set()
+    sale_total_pages = 0
+    sale_total_rows = 0
+    sale_page_size = 0
 
-    output: list[SaleRow] = []
-    listed_count = 0
-    skipped_payment_count = 0
-    page_no = 1
-    seen_sale_nos: set[str] = set()
-    while True:
-        if page.is_closed():
-            available = [candidate for candidate in page.context.pages if not candidate.is_closed()]
-            if not available:
-                raise RuntimeError("打印后浏览器页面已关闭，无法继续读取销售列表")
-            page = available[0]
-            page.wait_for_timeout(500)
-        grid = data_grid(page)
-        rows = grid.locator("tr")
-        log(f"{sale_type}: 正在读取第 {page_no} 页")
-        for i in range(rows.count()):
-            cells = rows.nth(i).locator("td")
-            vals = [clean(cells.nth(j).inner_text()) for j in range(cells.count())]
-            if len(vals) < 8 or not vals[1] or not re.search(r"\d{4}-\d{2}-\d{2}", vals[2]):
-                continue
-            sale_no, sale_date = vals[1], vals[2]
-            if sale_no in seen_sale_nos:
-                continue
-            seen_sale_nos.add(sale_no)
-            listed_count += 1
-            payment_date = vals[3] if len(vals) > 3 else ""
-            customer = vals[4] if len(vals) > 4 else ""
-            if not payment_date or not re.search(r"\d{4}-\d{2}-\d{2}", payment_date):
-                skipped_payment_count += 1
-                continue
-            amount = vals[5] if len(vals) > 5 else ""
-            weight = vals[6] if len(vals) > 6 else ""
-            material = recovery_no = remark = tax = ""
-            close = None
-            try:
-                rows.nth(i).get_by_text("查看", exact=True).click()
-                close = page.get_by_role("button", name="关闭").last
-                close.wait_for(state="visible", timeout=10000)
-                page.wait_for_timeout(700)
-                material, recovery_no, calculated_amount, tax = detail_summary(page)
-                if not amount:
-                    amount = calculated_amount
-                remark_box = page.locator("textarea:visible").last
-                remark = clean(remark_box.input_value()) if remark_box.count() else ""
-                if pdf_dir is not None:
-                    pdf_dir.mkdir(parents=True, exist_ok=True)
-                    pdf_path = pdf_dir / f"{safe_filename(sale_type)}-{safe_filename(sale_date)}-{safe_filename(sale_no)}.pdf"
-                    # Capture the ERP ticket-print response, rather than
-                    # printing the underlying detail form.
-                    if not save_printbill_pdf(page, pdf_path, log):
-                        log(f"未生成票据 PDF: {pdf_path.name}")
-                    else:
-                        if generated_pdfs is not None:
-                            generated_pdfs.add(pdf_path.resolve())
-                        log(f"已保存 PDF: {pdf_path.name}")
-            except (PlaywrightTimeoutError, PlaywrightError, IndexError, OSError):
-                log(f"详情读取失败: {sale_no}")
-            finally:
-                try:
-                    if close is not None and not page.is_closed() and close.count() and close.is_visible():
-                        close.click(timeout=3000)
-                        page.wait_for_timeout(300)
-                except PlaywrightError:
-                    log(f"详情关闭失败: {sale_no}")
-            output.append(SaleRow(sale_type, sale_no, sale_date, payment_date, material, recovery_no, amount, tax, weight, remark))
-
-        next_button = page.locator('button[paging-btn="nextPage"]')
-        if not next_button.count() or next_button.is_disabled() or "disabled" in (next_button.get_attribute("class") or ""):
-            break
-        first_no = ""
-        if rows.count() and rows.first.locator("td").count() > 1:
-            first_no = clean(rows.first.locator("td").nth(1).inner_text())
-        next_button.click()
+    def capture_sale_response(response):
+        nonlocal sale_total_pages, sale_total_rows, sale_page_size
+        if "erp.bfcgj.com" not in response.url:
+            return
         try:
-            page.wait_for_timeout(800)
-            for _ in range(20):
-                new_grid = data_grid(page)
-                new_rows = new_grid.locator("tr")
-                if new_rows.count() and new_rows.first.locator("td").count() > 1:
-                    new_no = clean(new_rows.first.locator("td").nth(1).inner_text())
-                    if new_no and new_no != first_no:
-                        break
-                page.wait_for_timeout(300)
-            else:
+            payload = response.json()
+        except Exception:
+            return
+        for block in find_named_blocks(payload, "data_list", MODULES[sale_type]):
+            rows = list(block["rowsData"])
+            signature = tuple(clean(str(row.get("c0") or "")) for row in rows)
+            if signature and signature not in sale_page_signatures:
+                sale_page_signatures.add(signature)
+                sale_page_batches.append(rows)
+            page_index = int(block.get("page") or 0)
+            sale_page_rows[page_index] = rows
+            sale_total_pages = max(sale_total_pages, int(block.get("pages") or 0))
+            sale_total_rows = max(sale_total_rows, int(block.get("totalRows") or 0))
+            sale_page_size = max(sale_page_size, int(block.get("pageRows") or len(rows)))
+
+    page.on("response", capture_sale_response)
+    output: list[SaleRow] = []
+    detail_failures: list[str] = []
+    listed_count = skipped_payment_count = page_no = 0
+    seen_sale_nos: set[str] = set()
+    try:
+        filter_tables = page.locator("table.yc-view-free-table:visible")
+        filter_table = filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
+        if not apply_sale_date_filters(filter_table, start, end):
+            raise RuntimeError(f"{sale_type}日期筛选未成功执行，已停止导出")
+        log(f"{sale_type}: 已提交销售日期筛选 {start} 至 {end}")
+        deadline = time.monotonic() + 10
+        while not sale_page_batches and time.monotonic() < deadline:
+            page.wait_for_timeout(200)
+        if not sale_page_batches:
+            raise RuntimeError(f"未捕获{sale_type} data_list 响应，已停止导出")
+        sale_page_rows[0] = sale_page_batches[0]
+        if sale_total_pages:
+            log(f"{sale_type}: 接口共 {sale_total_pages} 页")
+        if sale_total_rows > len(sale_page_batches[0]):
+            expected_pages = (sale_total_rows + max(sale_page_size, 1) - 1) // max(sale_page_size, 1)
+            log(f"{sale_type}: 接口共 {sale_total_rows} 条，预计 {expected_pages} 页")
+
+        while True:
+            if page.is_closed():
+                raise RuntimeError("ERP 页面已关闭，无法继续读取销售列表")
+            page_no += 1
+            log(f"{sale_type}: 正在读取第 {page_no} 页")
+            current_rows = sale_page_rows.get(page_no - 1)
+            if current_rows is None and page_no - 1 < len(sale_page_batches):
+                current_rows = sale_page_batches[page_no - 1]
+            if current_rows is None:
+                raise RuntimeError(f"未捕获{sale_type}第 {page_no} 页 data_list 响应")
+            for sale_no, sale_date, payment_date, _customer, _amount, _list_weight in (
+                    sale_list_row(sale_type, row) for row in current_rows):
+                if sale_no in seen_sale_nos:
+                    continue
+                seen_sale_nos.add(sale_no)
+                listed_count += 1
+                if not payment_date or not re.search(r"\d{4}-\d{2}-\d{2}", payment_date):
+                    skipped_payment_count += 1
+                    continue
+                material = recovery_no = remark = tax = ""
+                close = None
+                capture_detail_response = None
+                try:
+                    log(f"{sale_type}: 正在读取销售单 {sale_no} 详情")
+                    detail_response_rows: list[dict] = []
+                    master_response_rows: list[dict] = []
+                    detail_row_keys: set[tuple] = set()
+                    master_row_keys: set[tuple] = set()
+
+                    def response_row_key(row: dict) -> tuple:
+                        """Identify repeated ERP rows across duplicate responses."""
+                        for field in ("__rowid", "__rownum"):
+                            value = row.get(field)
+                            if value is not None and clean(str(value)):
+                                return field, str(value)
+                        return "data", json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+
+                    def capture_detail_response(response):
+                        if "erp.bfcgj.com" not in response.url:
+                            return
+                        try:
+                            payload = response.json()
+                        except Exception:
+                            return
+                        detail_module = MODULES[sale_type].replace("_desk", "_bill")
+                        for block in find_named_blocks(payload, "data_d", detail_module):
+                            for row in block["rowsData"]:
+                                if clean(str(row.get("c0") or "")) != sale_no:
+                                    continue
+                                key = response_row_key(row)
+                                if key not in detail_row_keys:
+                                    detail_row_keys.add(key)
+                                    detail_response_rows.append(row)
+                        for block in find_named_blocks(payload, "data_m", detail_module):
+                            for row in block["rowsData"]:
+                                if clean(str(row.get("c0") or "")) != sale_no:
+                                    continue
+                                key = response_row_key(row)
+                                if key not in master_row_keys:
+                                    master_row_keys.add(key)
+                                    master_response_rows.append(row)
+
+                    page.on("response", capture_detail_response)
+                    click_sale_detail(page, sale_no)
+                    close = page.get_by_role("button", name="关闭").last
+                    close.wait_for(state="visible", timeout=10000)
+                    deadline = time.monotonic() + 10
+                    while (not detail_response_rows or not master_response_rows) and time.monotonic() < deadline:
+                        page.wait_for_timeout(200)
+                    if not detail_response_rows or not master_response_rows:
+                        raise RuntimeError("未捕获销售详情完整 data_m/data_d 响应")
+                    material, recovery_no, calculated_amount, detail_tax, weight = detail_api_summary(sale_type, detail_response_rows)
+                    master_amount, master_tax, remark = sale_master_api_summary(master_response_rows)
+                    amount = master_amount or calculated_amount
+                    tax = master_tax if numeric_value(master_tax) not in (None, 0.0) else detail_tax
+                    log(f"{sale_type}: 已读取销售单 {sale_no} 详情")
+                    if pdf_dir is not None:
+                        pdf_path = pdf_dir / f"{safe_filename(sale_type)}-{safe_filename(sale_date)}-{safe_filename(sale_no)}.pdf"
+                        if save_printbill_pdf(page, pdf_path, log):
+                            if generated_pdfs is not None:
+                                generated_pdfs.add(pdf_path.resolve())
+                            log(f"已保存 PDF: {pdf_path.name}")
+                        else:
+                            log(f"未生成票据 PDF: {pdf_path.name}")
+                except (RuntimeError, PlaywrightTimeoutError, PlaywrightError, IndexError, OSError) as exc:
+                    detail_failures.append(sale_no)
+                    log(f"详情读取失败，已保留主表行 {sale_no}: {exc}")
+                finally:
+                    if capture_detail_response is not None:
+                        remove_response_listener(page, capture_detail_response)
+                    try:
+                        if close is not None and not page.is_closed() and close.count() and close.is_visible():
+                            close.click(timeout=3000)
+                            page.wait_for_timeout(300)
+                    except PlaywrightError:
+                        log(f"详情关闭失败: {sale_no}")
+                output.append(SaleRow(sale_type, sale_no, sale_date, payment_date, material, recovery_no, amount, tax, weight, remark))
+
+            # The API's page count is authoritative. Do not click the next
+            # button after the final page, where no new data_list response can
+            # arrive and the old timeout misleadingly reports a missing page.
+            if sale_total_pages and page_no >= sale_total_pages:
                 break
-        except PlaywrightTimeoutError:
-            break
-        page_no += 1
-    log(f"{sale_type}: 列表销售单 {listed_count} 张，因收款日期为空跳过 {skipped_payment_count} 张，导出 {len(output)} 张")
+            target_page = str(page_no + 1)
+            page_links = page.locator("li.paging-item:visible")
+            next_buttons = page.locator('[paging-btn="nextPage"]:visible')
+            advance = None
+            for link_index in range(page_links.count()):
+                candidate = page_links.nth(link_index)
+                if clean(candidate.inner_text()) == target_page:
+                    advance = candidate
+                    break
+            if advance is not None:
+                pass
+            else:
+                if not next_buttons.count():
+                    break
+                advance = next_buttons.last
+                if advance.is_disabled() or "disabled" in (advance.get_attribute("class") or ""):
+                    break
+            previous_batch_count = len(sale_page_batches)
+            selected_page = ""
+            selected_items = page.locator("li.paging-item.paging-item-selected:visible")
+            if selected_items.count():
+                selected_page = clean(selected_items.last.inner_text())
+            already_selected = selected_page == target_page
+            batch_ready = already_selected and len(sale_page_batches) > page_no
+            if already_selected and len(sale_page_batches) > page_no:
+                sale_page_rows[page_no] = sale_page_batches[page_no]
+            elif not already_selected:
+                advance.scroll_into_view_if_needed()
+                advance.click(timeout=10000, force=True)
+            deadline = time.monotonic() + 10
+            if not batch_ready:
+                while len(sale_page_batches) <= previous_batch_count and time.monotonic() < deadline:
+                    page.wait_for_timeout(200)
+                if len(sale_page_batches) <= previous_batch_count:
+                    raise RuntimeError(f"未捕获{sale_type}第 {page_no + 1} 页 data_list 响应")
+                sale_page_rows[page_no] = sale_page_batches[previous_batch_count]
+    finally:
+        remove_response_listener(page, capture_sale_response)
+    failure_note = f"；详情失败 {len(detail_failures)} 张: {'、'.join(detail_failures)}" if detail_failures else ""
+    log(f"{sale_type}: 列表销售单 {listed_count} 张，因收款日期为空跳过 {skipped_payment_count} 张，导出 {len(output)} 张{failure_note}")
     return output
 
 
@@ -816,8 +898,121 @@ def export_report(rows: list[SaleRow], sheets: dict[str, tuple[list[str], list[l
     wb.save(path)
 
 
-def export_xlsx(rows: list[SaleRow], path: Path) -> None:
-    export_report(rows, {}, path)
+def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_name: str,
+                                  open_form) -> list[dict]:
+    """Collect vc_bill_list responses and always detach the page listener."""
+    response_rows: list[dict] = []
+    response_count = 0
+    total_pages = 0
+    total_rows = 0
+    page_size = 0
+
+    def capture_response(response):
+        nonlocal response_count, total_pages, total_rows, page_size
+        if "erp.bfcgj.com" not in response.url:
+            return
+        try:
+            payload = response.json()
+        except Exception:
+            return
+        blocks = find_named_blocks(payload, "vc_bill_list")
+        if blocks:
+            for block in blocks:
+                rows = list(block["rowsData"])
+                response_rows.extend(rows)
+                total_pages = max(total_pages, int(block.get("pages") or 0))
+                total_rows = max(total_rows, int(block.get("totalRows") or 0))
+                page_size = max(page_size, int(block.get("pageRows") or len(rows)))
+            if not total_pages and total_rows and page_size:
+                total_pages = (total_rows + page_size - 1) // page_size
+            response_count += 1
+
+    def wait_for_response(previous_count: int, timeout: float = 10, phase: str = "翻页") -> bool:
+        deadline = time.monotonic() + timeout
+        while response_count <= previous_count and time.monotonic() < deadline:
+            page.wait_for_timeout(200)
+        if response_count <= previous_count:
+            if response_rows:
+                log(f"{form_name}: {phase}未产生新的 vc_bill_list 响应，沿用已捕获数据")
+                return False
+            raise RuntimeError(f"{form_name}: {phase}未捕获 vc_bill_list 响应")
+        return True
+
+    page.on("response", capture_response)
+    try:
+        filter_table = open_form()
+        page.wait_for_timeout(300)
+        # The form opening request returns the unfiltered default list.
+        # Discard it before applying the requested date range so those
+        # rows cannot leak into the export.
+        if response_rows:
+            log(f"{form_name}: 已丢弃默认列表 {len(response_rows)} 条，准备应用日期筛选")
+        response_rows.clear()
+        response_count = 0
+        total_pages = 0
+        total_rows = 0
+        page_size = 0
+        before_search = response_count
+        if apply_date_filters(filter_table, start, end):
+            wait_for_response(before_search, phase="日期筛选")
+        else:
+            search = filter_table.get_by_role("button", name="搜索")
+            if search.count():
+                before_search = response_count
+                search.click()
+                wait_for_response(before_search, phase="搜索")
+        page_no = 1
+        while True:
+            log(f"{form_name}: 正在读取第 {page_no} 页")
+            if total_pages and page_no >= total_pages:
+                log(f"{form_name}: 接口共 {total_pages} 页")
+                break
+            # A stale ERP pager can remain visible after a form switch. If
+            # the response did not provide page metadata, do not click it and
+            # wait for a response that may belong to another view.
+            if not total_pages:
+                log(f"{form_name}: 接口未提供可靠分页信息，已停止在第 {page_no} 页")
+                break
+            next_button = page.locator('button[paging-btn="nextPage"]:visible').last
+            if not next_button.count() or next_button.is_disabled() or "disabled" in (next_button.get_attribute("class") or ""):
+                break
+            before_page = response_count
+            next_button.click()
+            wait_for_response(before_page, phase="翻页")
+            page_no += 1
+        # The PDF pass runs after this listener is detached; preserve the
+        # server-reported page count for that second pass.
+        setattr(page, "_facas_voucher_total_pages", total_pages)
+        return response_rows
+    finally:
+        remove_response_listener(page, capture_response)
+
+
+def click_voucher_page_and_wait(page: Page, button, form_name: str, timeout: float = 10) -> None:
+    """Click a voucher pager control and wait for its vc_bill_list response."""
+    response_count = 0
+
+    def capture_response(response):
+        nonlocal response_count
+        if "erp.bfcgj.com" not in response.url:
+            return
+        try:
+            payload = response.json()
+        except Exception:
+            return
+        if find_named_blocks(payload, "vc_bill_list"):
+            response_count += 1
+
+    page.on("response", capture_response)
+    try:
+        button.click(timeout=10000, force=True)
+        deadline = time.monotonic() + timeout
+        while response_count == 0 and time.monotonic() < deadline:
+            page.wait_for_timeout(200)
+        if response_count == 0:
+            raise RuntimeError(f"{form_name} 翻页后未捕获 vc_bill_list 响应")
+    finally:
+        remove_response_listener(page, capture_response)
 
 
 def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
@@ -833,70 +1028,29 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
     )
     for parent_name, child_name in menu_path:
         expand_menu_section(page, parent_name, child_name)
-    # The last path step may only expose the form label; click it explicitly.
-    click_visible_menu_item(page, form_name)
-    page.wait_for_timeout(700)
-    table = data_grid(page)
-    table.wait_for(state="visible", timeout=15000)
-    response_rows = []
+    log(f"{form_name}: 正在打开凭证列表")
+    def open_form():
+        # The response listener must be installed before opening the form;
+        # ERP commonly sends the initial vc_bill_list request immediately.
+        click_visible_menu_item(page, form_name)
+        page.wait_for_timeout(700)
+        table = data_grid(page, ("票据号码", "单据日期"))
+        table.wait_for(state="visible", timeout=15000)
+        filter_tables = page.locator("table.yc-view-free-table:visible")
+        return filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
 
-    def capture_response(response):
-        if "erp.bfcgj.com" not in response.url:
-            return
-        try:
-            payload = response.json()
-        except Exception:
-            return
-        rows = find_voucher_rows(payload)
-        if rows is not None:
-            response_rows.extend(rows)
-
-    page.on("response", capture_response)
-    filter_tables = page.locator("table.yc-view-free-table:visible")
-    filter_table = filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
-    if apply_date_filters(filter_table, start, end):
-        page.wait_for_timeout(900)
-    else:
-        search = filter_table.get_by_role("button", name="搜索")
-        if search.count():
-            search.click()
-            page.wait_for_timeout(900)
+    response_rows = collect_voucher_response_rows(page, start, end, log, form_name, open_form)
+    voucher_total_pages = getattr(page, "_facas_voucher_total_pages", 0)
+    log(f"{form_name}: 已获取 {len(response_rows)} 条接口记录")
 
     # Confirmed visible order, mapped to the vc_bill_list response fields.
     headers: list[str] = [
-        "单据日期", "完成日期", "票据号码", "对方单位",
-        "金额", "结算方式", "制单",
+        "票据号码", "单据日期", "对方单位", "结算方式",
+        "完成日期", "金额", "制单",
     ]
     rows_out: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
-    page_no = 1
-    while True:
-        table = data_grid(page)
-        rows = table.locator("tbody tr")
-        if not rows.count():
-            rows = table.locator("tr")
-        log(f"{form_name}: 正在读取第 {page_no} 页")
-        for i in range(rows.count()):
-            cells = rows.nth(i).locator("td")
-            values = [clean(cells.nth(j).inner_text()) for j in range(cells.count())]
-            if not values or not any(values):
-                continue
-            key = tuple(values)
-            if key not in seen:
-                seen.add(key)
-                rows_out.append(values)
-        next_button = page.locator('button[paging-btn="nextPage"]')
-        if not next_button.count() or next_button.is_disabled() or "disabled" in (next_button.get_attribute("class") or ""):
-            break
-        before = tuple(rows_out[-1]) if rows_out else ()
-        next_button.click()
-        page.wait_for_timeout(800)
-        if rows_out and tuple(clean(x) for x in data_grid(page).locator("tr").last.locator("td").all_inner_texts()) == before:
-            break
-        page_no += 1
     if not response_rows:
         raise RuntimeError("未捕获 vc_bill_list 响应，已停止导出以避免生成错误列数据")
-    rows_out = []
     seen_response = set()
     for row in response_rows:
         bill_no = clean(str(row.get("c0", "")))
@@ -908,39 +1062,62 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
         if any(values) and values not in rows_out:
             rows_out.append(values)
     if pdf_dir is not None:
-        pdf_dir.mkdir(parents=True, exist_ok=True)
         pending = {}
         for row in response_rows:
             bill_no = clean(str(row.get("c0", "")))
             if bill_no:
                 pending.setdefault(bill_no, row)
+        log(f"{form_name}: 开始批量保存 PDF，共 {len(pending)} 张")
 
         # List extraction ends on the final page. Return to the beginning and
         # process the visible bills page by page so earlier pages are not lost.
-        previous_button = page.locator('button[paging-btn="prevPage"]')
-        for _ in range(200):
-            if not previous_button.count() or previous_button.is_disabled() or "disabled" in (previous_button.get_attribute("class") or ""):
-                break
-            previous_button.click()
-            page.wait_for_timeout(800)
+        previous_button = page.locator('button[paging-btn="prevPage"]:visible').last
+        selected_page = "1"
+        selected_items = page.locator("li.paging-item.paging-item-selected:visible")
+        if selected_items.count():
+            selected_page = clean(selected_items.last.inner_text())
+        if selected_page != "1":
+            for _ in range(200):
+                if (not previous_button.count() or previous_button.is_disabled()
+                        or "disabled" in (previous_button.get_attribute("class") or "")):
+                    break
+                click_voucher_page_and_wait(page, previous_button, form_name)
 
         while pending:
-            grid = data_grid(page)
+            grid = data_grid(page, ("票据号码", "单据日期"))
             for bill_no, row in list(pending.items()):
-                matching_row = grid.locator("tr").filter(has_text=bill_no)
+                log(f"{form_name}: 正在打开单据 {bill_no} 详情")
+                # The API uses the internal number ($AF...), while the grid
+                # normally renders only c1 (for example 00000080). Match
+                # either representation instead of assuming both are shown.
+                short_bill_no = clean(str(row.get("c1") or ""))
+                bill_tokens = [token for token in (bill_no, short_bill_no) if token]
+                matching_rows = []
+                for row_index in range(grid.locator("tr").count()):
+                    candidate_row = grid.locator("tr").nth(row_index)
+                    try:
+                        if not candidate_row.is_visible():
+                            continue
+                        row_text = clean(candidate_row.inner_text())
+                        if any(token in row_text for token in bill_tokens):
+                            matching_rows.append((candidate_row, row_text))
+                    except PlaywrightError:
+                        continue
                 opened = False
-                for index in range(matching_row.count()):
-                    candidate = matching_row.nth(index)
+                for candidate, row_text in matching_rows:
                     if candidate.is_visible():
                         try:
+                            log(f"{form_name}: 已匹配票据行 {row_text[:120]}")
                             candidate.dblclick(timeout=5000)
                             opened = True
                             break
                         except PlaywrightError:
                             continue
                 if not opened:
+                    log(f"{form_name}: 当前页未找到单据 {bill_no}，保留待处理")
                     continue
                 pending.pop(bill_no)
+                log(f"{form_name}: 已打开单据 {bill_no} 详情")
                 try:
                     page.wait_for_timeout(700)
                     bill_date = voucher_value(row, "单据日期") or start
@@ -961,25 +1138,27 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
                             page.wait_for_timeout(300)
                     except PlaywrightError:
                         log(f"{form_name} 详情关闭失败: {bill_no}")
-            next_button = page.locator('button[paging-btn="nextPage"]')
+            if voucher_total_pages:
+                selected_items = page.locator("li.paging-item.paging-item-selected:visible")
+                selected_page = clean(selected_items.last.inner_text()) if selected_items.count() else ""
+                if selected_page and selected_page.isdigit() and int(selected_page) >= voucher_total_pages:
+                    break
+            next_button = page.locator('button[paging-btn="nextPage"]:visible').last
             if not next_button.count() or next_button.is_disabled() or "disabled" in (next_button.get_attribute("class") or ""):
                 break
-            next_button.click()
-            page.wait_for_timeout(800)
+            click_voucher_page_and_wait(page, next_button, form_name)
         for bill_no in pending:
             log(f"{form_name} 未找到可双击的票据行: {bill_no}")
-    if not headers and rows_out:
-        headers = [f"字段{i + 1}" for i in range(len(rows_out[0]))]
     width = len(headers)
     rows_out = [row[:width] + [""] * max(0, width - len(row)) for row in rows_out]
     return headers, rows_out
 
 
-def export_form_sheets(sheets: dict[str, tuple[list[str], list[list[str]]]], path: Path) -> None:
-    export_report([], sheets, path)
-
-
 def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: Path | None = None, selected_forms: list[str] | None = None, save_excel: bool = True) -> tuple[int, int]:
+    if save_excel:
+        output.parent.mkdir(parents=True, exist_ok=True)
+    if pdf_dir is not None:
+        pdf_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         if not debug_port_available():
             start_debug_edge()
@@ -1015,12 +1194,14 @@ def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: P
                 except Exception as exc:
                     form_errors.append(f"{form_name}: {exc}")
                     log(f"{form_name} 读取失败: {exc}")
-            if not form_sheets and not rows and save_excel:
+            if not form_sheets and not rows:
                 raise RuntimeError("凭证类型均未读取成功: " + "；".join(form_errors))
             for error in form_errors:
                 log(f"跳过失败类型: {error}")
         if save_excel and (rows or form_sheets):
+            log(f"正在生成 Excel: {output}")
             export_report(rows, form_sheets, output)
+            log(f"Excel 已生成: {output}")
         form_row_count = sum(len(rows_data) for _, rows_data in form_sheets.values()) if selected_forms else 0
         total_count = len(rows) + form_row_count
         pdf_count = len(generated_pdfs)
@@ -1036,21 +1217,27 @@ class App(tk.Tk):
         self.running = False
         self.start_button = None
         self.title("报废汽车财务数据自动化处理")
-        self.geometry("860x680")
-        self.minsize(760, 590)
+        self.geometry("860x560")
+        self.minsize(760, 500)
         today = date.today().isoformat()
         self.start = tk.StringVar(value=today)
         self.end = tk.StringVar(value=today)
         app_dir = Path(__file__).resolve().parent
         self.app_dir = app_dir
-        self.output = tk.StringVar(value=str(app_dir / "销售数据.xlsx"))
-        self.pdf_dir = tk.StringVar(value=str(app_dir / "销售单据PDF"))
+        # Generated business files live below the application folder by default.
+        # User-selected paths are preserved by load_settings().
+        output_root = app_dir / "output"
+        self.default_output = output_root / "Excel" / "销售数据.xlsx"
+        self.default_pdf_dir = output_root / "PDF"
+        self.output = tk.StringVar(value=str(self.default_output))
+        self.pdf_dir = tk.StringVar(value=str(self.default_pdf_dir))
         self.save_pdfs = tk.BooleanVar(value=True)
         self.save_excel = tk.BooleanVar(value=True)
         self.vars = {name: tk.BooleanVar(value=True) for name in MODULES}
         self.form_vars = {name: tk.BooleanVar(value=False) for name in FORM_MODULES}
         self.settings_path = app_dir / "facas-settings.json"
-        self.run_log_path = app_dir / "facas-run.log"
+        self.log_dir = app_dir / "log"
+        self.run_log_path = self.log_dir / f"{date.today().isoformat()}.log"
         self.load_settings()
         self.log_box = None
         self.build()
@@ -1094,17 +1281,19 @@ class App(tk.Tk):
 
         output = ttk.LabelFrame(frame, text="输出设置", padding=(14, 10))
         output.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        output.columnconfigure(1, weight=1)
-        switch_box = ttk.Frame(output)
-        switch_box.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
-        ttk.Checkbutton(switch_box, text="生成 Excel", variable=self.save_excel).pack(side="left", padx=(0, 24))
-        ttk.Checkbutton(switch_box, text="保存单据 PDF", variable=self.save_pdfs).pack(side="left")
-        ttk.Label(output, text="Excel 文件").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=5)
-        ttk.Entry(output, textvariable=self.output).grid(row=1, column=1, sticky="ew", pady=5)
-        ttk.Button(output, text="选择文件", command=self.choose).grid(row=1, column=2, padx=(10, 0), pady=5)
-        ttk.Label(output, text="PDF 目录").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=5)
-        ttk.Entry(output, textvariable=self.pdf_dir).grid(row=2, column=1, sticky="ew", pady=5)
-        ttk.Button(output, text="选择目录", command=self.choose_pdf_dir).grid(row=2, column=2, padx=(10, 0), pady=5)
+        output.columnconfigure(2, weight=1)
+        ttk.Checkbutton(output, text="Excel", variable=self.save_excel).grid(
+            row=0, column=0, sticky="w", padx=(0, 12), pady=5
+        )
+        ttk.Label(output, text="文件").grid(row=0, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Entry(output, textvariable=self.output).grid(row=0, column=2, sticky="ew", pady=5)
+        ttk.Button(output, text="选择文件", command=self.choose).grid(row=0, column=3, padx=(10, 0), pady=5)
+        ttk.Checkbutton(output, text="PDF", variable=self.save_pdfs).grid(
+            row=1, column=0, sticky="w", padx=(0, 12), pady=5
+        )
+        ttk.Label(output, text="目录").grid(row=1, column=1, sticky="w", padx=(0, 10), pady=5)
+        ttk.Entry(output, textvariable=self.pdf_dir).grid(row=1, column=2, sticky="ew", pady=5)
+        ttk.Button(output, text="选择目录", command=self.choose_pdf_dir).grid(row=1, column=3, padx=(10, 0), pady=5)
 
         log_frame = ttk.LabelFrame(frame, text="运行日志", padding=(8, 8))
         log_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
@@ -1112,7 +1301,7 @@ class App(tk.Tk):
         log_frame.rowconfigure(0, weight=1)
         self.log_box = tk.Listbox(
             log_frame,
-            height=12,
+            height=5,
             bg="#ffffff",
             fg="#111827",
             selectbackground="#dbeafe",
@@ -1226,32 +1415,26 @@ class App(tk.Tk):
         for variable in self.form_vars.values():
             variable.set(enabled)
 
-    def set_range(self, start, end):
-        self.start.set(start.isoformat())
-        self.end.set(end.isoformat())
-
-    def set_today(self):
-        today = date.today(); self.set_range(today, today)
-
-    def set_yesterday(self):
-        yesterday = date.today() - timedelta(days=1); self.set_range(yesterday, yesterday)
-
-    def set_this_month(self):
-        today = date.today(); self.set_range(today.replace(day=1), today)
-
-    def set_last_month(self):
-        today = date.today().replace(day=1)
-        last_day = today - timedelta(days=1)
-        self.set_range(last_day.replace(day=1), last_day)
-
     def load_settings(self):
         try:
             settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        for key, variable in (("start", self.start), ("end", self.end), ("output", self.output), ("pdf_dir", self.pdf_dir)):
+        for key, variable in (("start", self.start), ("end", self.end)):
             if settings.get(key):
                 variable.set(settings[key])
+        # Migrate paths written by older versions, but never overwrite a
+        # custom path selected by the user.
+        old_default_output = self.app_dir / "销售数据.xlsx"
+        old_default_pdf_dir = self.app_dir / "销售单据PDF"
+        stored_output = settings.get("output")
+        if stored_output:
+            stored_path = Path(stored_output)
+            self.output.set(str(self.default_output) if stored_path == old_default_output else stored_output)
+        stored_pdf_dir = settings.get("pdf_dir")
+        if stored_pdf_dir:
+            stored_path = Path(stored_pdf_dir)
+            self.pdf_dir.set(str(self.default_pdf_dir) if stored_path == old_default_pdf_dir else stored_pdf_dir)
         if "save_pdfs" in settings:
             self.save_pdfs.set(bool(settings["save_pdfs"]))
         if "save_excel" in settings:
@@ -1280,6 +1463,8 @@ class App(tk.Tk):
     def log(self, text):
         timestamped = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {text}"
         try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            self.run_log_path = self.log_dir / f"{date.today().isoformat()}.log"
             with self.run_log_path.open("a", encoding="utf-8") as handle:
                 handle.write(timestamped + "\n")
         except OSError:
@@ -1287,7 +1472,7 @@ class App(tk.Tk):
         self.log_queue.put(timestamped)
 
     def _log(self, text):
-        self.log_box.insert("end", text)
+        self.log_box.insert("end", text.rstrip("\n") + "\n")
         self.log_box.see("end")
 
     def flush_log_queue(self):
@@ -1320,6 +1505,11 @@ class App(tk.Tk):
         self.log(f"任务已启动，日期范围: {self.start.get()} 至 {self.end.get()}")
         self.log(f"销售分类: {', '.join(selected) if selected else '未选择'}")
         self.log(f"凭证类型: {', '.join(selected_forms) if selected_forms else '未选择'}")
+        self.log(f"输出设置: Excel={'开启' if save_excel else '关闭'}；PDF={'开启' if pdf_dir is not None else '关闭'}")
+        if save_excel:
+            self.log(f"Excel 路径: {output}")
+        if pdf_dir is not None:
+            self.log(f"PDF 目录: {pdf_dir}")
         threading.Thread(target=self.worker, args=(selected, selected_forms, start, end, output, pdf_dir, save_excel), daemon=True).start()
 
     def worker(self, selected, selected_forms, start, end, output, pdf_dir, save_excel):
@@ -1335,6 +1525,9 @@ class App(tk.Tk):
                 self.log(f"Excel 文件: {output}")
             if pdf_dir is not None:
                 self.log(f"PDF 目录: {pdf_dir}")
+            open_path = output.parent if save_excel else pdf_dir
+            if open_path is not None:
+                self.after(0, lambda path=open_path: open_output_directory(path))
             self.after(0, lambda text=message: messagebox.showinfo("完成", text))
         except LoginRequired as exc:
             message = str(exc)
@@ -1357,6 +1550,7 @@ if __name__ == "__main__":
     parser.add_argument("--start"); parser.add_argument("--end"); parser.add_argument("--output", type=Path); parser.add_argument("--pdf-dir", type=Path)
     args = parser.parse_args()
     if args.start and args.end:
-        run(args.start, args.end, args.output or Path("销售数据.xlsx"), list(MODULES), print, args.pdf_dir)
+        cli_output = args.output or (Path.cwd() / "output" / "Excel" / "销售数据.xlsx")
+        run(args.start, args.end, cli_output, list(MODULES), print, args.pdf_dir)
     else:
         App().mainloop()
