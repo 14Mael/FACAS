@@ -1602,7 +1602,7 @@ class App(tk.Tk):
                 self.log(f"Excel 文件: {output}")
             if pdf_dir is not None:
                 self.log(f"PDF 目录: {pdf_dir}")
-            open_path = output.parent if excel_generated else pdf_dir
+            open_path = output.parent if excel_generated else (pdf_dir if pdf_count else None)
             if open_path is not None:
                 self.after(0, lambda path=open_path: open_output_directory(path))
             self.after(0, lambda text=message: messagebox.showinfo("完成", text))
