@@ -17,4 +17,6 @@ output/
 # PyInstaller build artifacts
 build/
 dist/
+build-lean/
+dist-lean/
 *.spec
