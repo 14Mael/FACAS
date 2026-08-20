@@ -9,6 +9,7 @@ import queue
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -37,6 +38,13 @@ FORM_MODULES = {
 
 ERP_URL = "https://erp.bfcgj.com/module.jsp?module=desk_main"
 DEBUG_PORT = 9222
+
+
+def application_dir() -> Path:
+    """Return the script folder, or the executable folder when packaged."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 class LoginRequired(RuntimeError):
@@ -81,7 +89,7 @@ def start_debug_edge() -> None:
     edge = next((item for item in edge_paths if item.exists()), None)
     if edge is None:
         raise RuntimeError("未找到 Microsoft Edge，请安装 Edge 后重试")
-    profile = Path.cwd() / ".facas-edge-profile"
+    profile = application_dir() / ".facas-edge-profile"
     profile.mkdir(exist_ok=True)
     subprocess.Popen([
         str(edge),
@@ -1273,7 +1281,7 @@ class App(tk.Tk):
         today = date.today().isoformat()
         self.start = tk.StringVar(value=today)
         self.end = tk.StringVar(value=today)
-        app_dir = Path(__file__).resolve().parent
+        app_dir = application_dir()
         self.app_dir = app_dir
         # Generated business files live below the application folder by default.
         # User-selected paths are preserved by load_settings().

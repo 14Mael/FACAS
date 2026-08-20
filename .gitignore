@@ -13,3 +13,8 @@ output/
 ~$*.xlsx
 *.print-response.txt
 *.print-page.html
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
