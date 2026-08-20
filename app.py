@@ -674,9 +674,10 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
     sale_total_rows = 0
     sale_page_size = 0
     capture_sale_enabled = False
+    sale_response_seen = False
 
     def capture_sale_response(response):
-        nonlocal sale_total_pages, sale_total_rows, sale_page_size
+        nonlocal sale_total_pages, sale_total_rows, sale_page_size, sale_response_seen
         if not capture_sale_enabled:
             return
         if "erp.bfcgj.com" not in response.url:
@@ -686,6 +687,7 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
         except Exception:
             return
         for block in find_named_blocks(payload, "data_list", MODULES[sale_type]):
+            sale_response_seen = True
             rows = list(block["rowsData"])
             signature = tuple(clean(str(row.get("c0") or "")) for row in rows)
             if signature and signature not in sale_page_signatures:
@@ -698,11 +700,12 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
             sale_page_size = max(sale_page_size, int(block.get("pageRows") or len(rows)))
 
     def begin_sale_capture():
-        nonlocal capture_sale_enabled, sale_total_pages, sale_total_rows, sale_page_size
+        nonlocal capture_sale_enabled, sale_response_seen, sale_total_pages, sale_total_rows, sale_page_size
         sale_page_rows.clear()
         sale_page_batches.clear()
         sale_page_signatures.clear()
         sale_total_pages = sale_total_rows = sale_page_size = 0
+        sale_response_seen = False
         capture_sale_enabled = True
 
     page.on("response", capture_sale_response)
@@ -720,15 +723,21 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
         sale_page_batches.clear()
         sale_page_signatures.clear()
         sale_total_pages = sale_total_rows = sale_page_size = 0
+        sale_response_seen = False
         capture_sale_enabled = False
         if not apply_sale_date_filters(filter_table, start, end, begin_sale_capture):
             raise RuntimeError(f"{sale_type}日期筛选未成功执行，已停止导出")
         log(f"{sale_type}: 已提交销售日期筛选 {start} 至 {end}")
         deadline = time.monotonic() + 10
-        while not sale_page_batches and time.monotonic() < deadline:
+        while not sale_response_seen and time.monotonic() < deadline:
             page.wait_for_timeout(200)
-        if not sale_page_batches:
+        if not sale_response_seen:
             raise RuntimeError(f"未捕获{sale_type} data_list 响应，已停止导出")
+        if not sale_page_batches:
+            if sale_total_rows:
+                raise RuntimeError(f"{sale_type} data_list 返回空数据但 totalRows={sale_total_rows}")
+            log(f"{sale_type}: 日期范围内未查询到销售单")
+            return output
         sale_page_rows[0] = sale_page_batches[0]
         expected_pages = 0
         if sale_total_rows and sale_page_size:
@@ -1222,9 +1231,8 @@ def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: P
             module_rows = scrape_module(page, sale_type, start, end, log, pdf_dir, generated_pdfs)
             log(f"{sale_type}: 查询到 {len(module_rows)} 张销售单")
             rows.extend(module_rows)
-        if not rows:
-            if not selected_forms:
-                raise RuntimeError("未查询到销售单，未生成 Excel。请确认日期范围、销售分类和 Edge 页面登录状态。")
+        if not rows and not selected_forms:
+            log("所选日期范围内未查询到可导出的销售单")
         if selected_forms:
             form_errors = []
             for form_name in selected_forms:
@@ -1558,7 +1566,7 @@ class App(tk.Tk):
     def worker(self, selected, selected_forms, start, end, output, pdf_dir, save_excel):
         try:
             row_count, pdf_count, excel_generated = run(start, end, output, selected, self.log, pdf_dir, selected_forms, save_excel)
-            outputs = [f"共读取 {row_count} 条数据"]
+            outputs = ["日期范围内未查询到可导出数据" if row_count == 0 else f"共读取 {row_count} 条数据"]
             outputs.append("已生成 1 个 Excel" if excel_generated else "未生成 Excel")
             outputs.append(f"已生成 {pdf_count} 个 PDF" if pdf_dir is not None else "未生成 PDF")
             message = "；".join(outputs) + "。"
