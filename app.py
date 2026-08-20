@@ -672,6 +672,12 @@ def voucher_value(row: dict, header: str) -> str:
     return clean(str(value).replace("\u00a0", " "))
 
 
+def voucher_in_date_range(row: dict, start: str, end: str) -> bool:
+    """Filter voucher rows by the API's bill date field (c3)."""
+    bill_date = voucher_value(row, "单据日期")
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", bill_date) and start <= bill_date <= end)
+
+
 def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                   pdf_dir: Path | None = None, generated_pdfs: set[Path] | None = None) -> list[SaleRow]:
     if page.is_closed():
@@ -1010,24 +1016,15 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
         # rows cannot leak into the export.
         if response_rows:
             log(f"{form_name}: 已丢弃默认列表 {len(response_rows)} 条，准备应用日期筛选")
-        response_rows.clear()
-        response_count = 0
-        total_pages = 0
-        total_rows = 0
-        page_size = 0
-        capture_enabled = False
+        # 凭证探测器没有可用的日期筛选控件。重新触发列表查询，收集
+        # 全部接口分页后按 vc_bill_list.c3（单据日期）在本地筛选。
+        search = filter_table.get_by_role("button", name="搜索")
+        if not search.count():
+            raise RuntimeError(f"{form_name}: 未找到列表查询按钮")
+        begin_filtered_capture()
         before_search = response_count
-        if apply_date_filters(filter_table, start, end, begin_filtered_capture):
-            wait_for_response(before_search, phase="日期筛选")
-        else:
-            search = filter_table.get_by_role("button", name="搜索")
-            if search.count():
-                begin_filtered_capture()
-                before_search = response_count
-                search.click()
-                wait_for_response(before_search, phase="搜索")
-            else:
-                raise RuntimeError(f"{form_name}: 未找到搜索按钮")
+        search.click()
+        wait_for_response(before_search, phase="列表查询")
         page_no = 1
         while True:
             log(f"{form_name}: 正在读取第 {page_no} 页")
@@ -1049,8 +1046,10 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
             page_no += 1
         # The PDF pass runs after this listener is detached; preserve the
         # server-reported page count for that second pass.
+        filtered_rows = [row for row in response_rows if voucher_in_date_range(row, start, end)]
+        log(f"{form_name}: 接口读取 {len(response_rows)} 条，按单据日期筛选后 {len(filtered_rows)} 条")
         setattr(page, "_facas_voucher_total_pages", total_pages)
-        return response_rows
+        return filtered_rows
     finally:
         remove_response_listener(page, capture_response)
 
