@@ -245,7 +245,7 @@ def ensure_clodop(page: Page, log) -> bool:
         return False
 
 
-def save_printbill_pdf(page: Page, path: Path, log) -> bool:
+def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] | None = None) -> bool:
     """Capture the ERP PrintBill response and render returned markup."""
     # Do not click "单据打印": that action invokes the native Windows print
     # dialog. Preview is the non-destructive route used for PDF extraction.
@@ -265,14 +265,21 @@ def save_printbill_pdf(page: Page, path: Path, log) -> bool:
             payload = response.json()
         except Exception:
             payload = body
-        expected_values = print_payload_values(payload)
-        business_values = sorted({
-            value for value in expected_values
+        payload_values = print_payload_values(payload)
+        payload_business_values = sorted({
+            value for value in payload_values
             if re.search(r"\$[A-Z0-9]{6,}", value)
         }, key=len, reverse=True)
-        if not business_values:
-            log("PrintBill 响应未包含当前单据业务标识，拒绝使用旧打印页面")
-            business_values = []
+        # ERP may return a fixed template without the internal bill number.
+        # In that case validate the rendered frame against identifiers from
+        # the detail page that is currently open.
+        business_values = []
+        for value in [*(expected_values or []), *payload_business_values]:
+            value = clean(str(value or ""))
+            if value and len(value) >= 2 and value not in business_values:
+                business_values.append(value)
+        if not payload_business_values:
+            log("PrintBill 响应未包含内部单号，改用当前单据页面标识校验")
         # The response often contains only the fixed template. Prefer the
         # fully populated #bill1 rendered by the ERP print iframe.
         markup = page_print_markup(page, business_values)
@@ -837,7 +844,8 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                     log(f"{sale_type}: 已读取销售单 {sale_no} 详情")
                     if pdf_dir is not None:
                         pdf_path = pdf_dir / f"{safe_filename(sale_type)}-{safe_filename(sale_date)}-{safe_filename(sale_no)}.pdf"
-                        if save_printbill_pdf(page, pdf_path, log):
+                        expected_print_values = [sale_no, sale_no.lstrip("$")[-8:], sale_date]
+                        if save_printbill_pdf(page, pdf_path, log, expected_print_values):
                             if generated_pdfs is not None:
                                 generated_pdfs.add(pdf_path.resolve())
                             log(f"已保存 PDF: {pdf_path.name}")
@@ -1181,7 +1189,8 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
                     page.wait_for_timeout(700)
                     bill_date = voucher_value(row, "单据日期") or start
                     pdf_path = pdf_dir / f"{safe_filename(form_name)}-{safe_filename(bill_date)}-{safe_filename(bill_no)}.pdf"
-                    if save_printbill_pdf(page, pdf_path, log):
+                    expected_print_values = [bill_no, short_bill_no, bill_date]
+                    if save_printbill_pdf(page, pdf_path, log, expected_print_values):
                         if generated_pdfs is not None:
                             generated_pdfs.add(pdf_path.resolve())
                         log(f"已保存 PDF: {pdf_path.name}")
