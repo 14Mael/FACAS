@@ -1009,6 +1009,10 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
 
     page.on("response", capture_response)
     try:
+        # Capture the list request emitted while opening the form. The voucher
+        # page has no reliable date-filter controls, so this initial response
+        # is the source dataset that will later be filtered by c3.
+        capture_enabled = True
         filter_table = open_form()
         page.wait_for_timeout(300)
         # The form opening request returns the unfiltered default list.
@@ -1016,15 +1020,16 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
         # rows cannot leak into the export.
         if response_rows:
             log(f"{form_name}: 已丢弃默认列表 {len(response_rows)} 条，准备应用日期筛选")
-        # 凭证探测器没有可用的日期筛选控件。重新触发列表查询，收集
-        # 全部接口分页后按 vc_bill_list.c3（单据日期）在本地筛选。
-        search = filter_table.get_by_role("button", name="搜索")
-        if not search.count():
-            raise RuntimeError(f"{form_name}: 未找到列表查询按钮")
-        begin_filtered_capture()
-        before_search = response_count
-        search.click()
-        wait_for_response(before_search, phase="列表查询")
+        # If opening the form did not emit a list response, retry through the
+        # visible search button as a fallback.
+        if response_count == 0:
+            search = filter_table.get_by_role("button", name="搜索")
+            if not search.count():
+                raise RuntimeError(f"{form_name}: 未捕获 vc_bill_list 响应")
+            begin_filtered_capture()
+            before_search = response_count
+            search.click()
+            wait_for_response(before_search, phase="列表查询")
         page_no = 1
         while True:
             log(f"{form_name}: 正在读取第 {page_no} 页")
@@ -1048,6 +1053,7 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
         # server-reported page count for that second pass.
         filtered_rows = [row for row in response_rows if voucher_in_date_range(row, start, end)]
         log(f"{form_name}: 接口读取 {len(response_rows)} 条，按单据日期筛选后 {len(filtered_rows)} 条")
+        setattr(page, "_facas_voucher_response_seen", bool(response_count))
         setattr(page, "_facas_voucher_total_pages", total_pages)
         return filtered_rows
     finally:
@@ -1107,6 +1113,7 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
 
     response_rows = collect_voucher_response_rows(page, start, end, log, form_name, open_form)
     voucher_total_pages = getattr(page, "_facas_voucher_total_pages", 0)
+    voucher_response_seen = getattr(page, "_facas_voucher_response_seen", False)
     log(f"{form_name}: 已获取 {len(response_rows)} 条接口记录")
 
     # Confirmed visible order, mapped to the vc_bill_list response fields.
@@ -1115,6 +1122,9 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
         "完成日期", "金额", "制单",
     ]
     rows_out: list[list[str]] = []
+    if not response_rows and voucher_response_seen:
+        log(f"{form_name}: 日期范围内未查询到凭证")
+        return headers, []
     if not response_rows:
         raise RuntimeError("未捕获 vc_bill_list 响应，已停止导出以避免生成错误列数据")
     seen_response = set()
