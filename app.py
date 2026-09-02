@@ -893,8 +893,9 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                         remove_response_listener(page, capture_detail_response)
                     try:
                         if close is not None and not page.is_closed() and close.count() and close.is_visible():
-                            close.click(timeout=3000, force=True)
-                            page.wait_for_timeout(300)
+                            close.click(timeout=3000, force=True, no_wait_after=True)
+                            if not page.is_closed():
+                                page.wait_for_timeout(300)
                     except PlaywrightError:
                         log(f"详情关闭失败: {sale_no}")
                 if detail_succeeded:
@@ -1239,8 +1240,9 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
                     close = page.get_by_role("button", name="关闭").last
                     try:
                         if close.count() and close.is_visible():
-                            close.click(timeout=3000, force=True)
-                            page.wait_for_timeout(300)
+                            close.click(timeout=3000, force=True, no_wait_after=True)
+                            if not page.is_closed():
+                                page.wait_for_timeout(300)
                     except PlaywrightError:
                         log(f"{form_name} 详情关闭失败: {bill_no}")
             if voucher_total_pages:
