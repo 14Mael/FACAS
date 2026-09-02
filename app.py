@@ -501,73 +501,73 @@ def apply_date_filters(filter_table, start: str, end: str, before_search=None) -
 
 
 def apply_voucher_filters(page: Page, filter_table, start: str, end: str, before_search=None) -> bool:
-    """设置凭证探测器日期范围，并勾选包含已入库。"""
-    checkboxes = filter_table.locator("input[type='checkbox']:visible")
-    if not checkboxes.count():
-        return False
-
-    def checkbox_label(checkbox) -> str:
-        try:
-            return clean(checkbox.evaluate("""el => {
-                let node = el;
-                for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
-                    const text = (node.innerText || '').replace(/\\s+/g, '');
-                    if (text) return text;
-                }
-                return '';
-            }"""))
-        except PlaywrightError:
-            return ''
-
-    def find_date_control(labels):
-        for index in range(checkboxes.count()):
-            checkbox = checkboxes.nth(index)
-            label_text = checkbox_label(checkbox)
-            if not any(label in label_text for label in labels):
-                continue
-            container = checkbox.locator("xpath=ancestor::td[1]")
-            date_input = container.locator("input:not([type='checkbox']):visible").first
-            if not date_input.count():
-                container = checkbox.locator("xpath=ancestor::tr[1]")
-                date_input = container.locator("input:not([type='checkbox']):visible").first
-            if date_input.count() and date_input.is_editable():
-                return index, checkbox, date_input
+    """按凭证探测器筛选控件属性设置日期并包含已入账。"""
+    def control_by_filter(*names):
+        for name in names:
+            locator = filter_table.locator(f'input[filter-name="{name}"]:visible')
+            if locator.count():
+                return locator.first
         return None
 
-    start_control = find_date_control(("单据日期从", "开始日期", "日期从"))
-    end_control = find_date_control(("单据日期到", "结束日期", "日期到"))
+    def date_control(*names):
+        checkbox = control_by_filter(*names)
+        if checkbox is None:
+            return None
+        container = checkbox.locator("xpath=ancestor::tr[1]")
+        date_input = container.locator("input:not([type='checkbox']):visible").first
+        if not date_input.count():
+            container = checkbox.locator("xpath=ancestor::td[1]")
+            date_input = container.locator("input:not([type='checkbox']):visible").first
+        if not date_input.count() or not date_input.is_editable():
+            return None
+        return checkbox, date_input
+
+    start_control = date_control("billDateFrom", "bill_datefrom")
+    end_control = date_control("BillDateTo", "billDateTo", "bill_dateto")
     if start_control is None or end_control is None:
         return False
 
-    include_index = None
-    include_checkbox = None
-    for index in range(checkboxes.count()):
-        checkbox = checkboxes.nth(index)
-        if "包含已入库" in checkbox_label(checkbox):
-            include_index = index
-            include_checkbox = checkbox
-            break
+    include_checkbox = control_by_filter("accounted", "in_stock", "include_stock")
+    if include_checkbox is None:
+        labels = filter_table.get_by_text("包含已入账", exact=False)
+        if not labels.count():
+            labels = filter_table.get_by_text("包含已入库", exact=False)
+        if labels.count():
+            cell = labels.first.locator("xpath=ancestor::td[1]")
+            candidate = cell.locator("input[type='checkbox']:visible").first
+            if candidate.count():
+                include_checkbox = candidate
     if include_checkbox is None:
         return False
 
-    # 关闭其他筛选条件，只保留日期范围和包含已入库。
-    keep_indexes = {start_control[0], end_control[0], include_index}
-    for index in range(checkboxes.count()):
-        checkbox = checkboxes.nth(index)
-        if index not in keep_indexes:
+    # 关闭其他筛选条件，只保留日期范围和包含已入账。
+    keep = {"billDateFrom", "bill_datefrom", "BillDateTo", "billDateTo", "bill_dateto",
+            "accounted", "in_stock", "include_stock"}
+    for index in range(filter_table.locator("input[type='checkbox']:visible").count()):
+        checkbox = filter_table.locator("input[type='checkbox']:visible").nth(index)
+        filter_name = checkbox.get_attribute("filter-name") or ""
+        if filter_name not in keep:
             set_filter_checkbox(checkbox, False)
-    set_filter_checkbox(start_control[1], True)
-    set_filter_checkbox(end_control[1], True)
+    set_filter_checkbox(start_control[0], True)
+    set_filter_checkbox(end_control[0], True)
     set_filter_checkbox(include_checkbox, True)
-    start_control[2].fill(start)
-    end_control[2].fill(end)
-    start_control[2].press("Enter")
-    end_control[2].press("Enter")
+    start_control[1].fill(start)
+    end_control[1].fill(end)
+    start_control[1].press("Enter")
+    end_control[1].press("Enter")
 
-    confirm = filter_table.get_by_role("button", name="确认")
-    if not confirm.count():
-        confirm = page.get_by_role("button", name="确认").last
-    submit = confirm if confirm.count() and confirm.is_visible() else filter_table.get_by_role("button", name="搜索")
+    submit = None
+    for name in ("确定", "确认"):
+        candidate = filter_table.get_by_role("button", name=name)
+        if candidate.count() and candidate.is_visible():
+            submit = candidate.last
+            break
+        candidate = page.get_by_role("button", name=name)
+        if candidate.count() and candidate.is_visible():
+            submit = candidate.last
+            break
+    if submit is None:
+        submit = filter_table.get_by_role("button", name="搜索")
     if not submit.count():
         return False
     if before_search is not None:
@@ -1208,7 +1208,11 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
         page.wait_for_timeout(300)
         page.wait_for_timeout(300)
         filter_tables = page.locator("table.yc-view-free-table:visible")
-        return filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
+        for index in range(filter_tables.count()):
+            candidate = filter_tables.nth(index)
+            if candidate.locator("input[filter-name='billDateFrom']:visible, input[filter-name='bill_datefrom']:visible").count():
+                return candidate
+        raise RuntimeError(f"{form_name}: 打开过滤面板后未找到日期筛选表格")
 
     response_rows = collect_voucher_response_rows(page, start, end, log, form_name, open_form)
     voucher_total_pages = getattr(page, "_facas_voucher_total_pages", 0)
