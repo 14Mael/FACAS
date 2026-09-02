@@ -250,18 +250,24 @@ def dismiss_erp_print_error(page: Page, log) -> None:
 def ensure_clodop(page: Page, log) -> bool:
     """Load the local C-Lodop bridge when ERP did not include it in the page."""
     try:
-        ready = page.evaluate("""() => !!(window.LODOP && typeof window.LODOP.SET_LICENSES === 'function')""")
+        ready = page.evaluate("""() => {
+            const printer = window.LODOP || window.CLODOP;
+            return !!(printer && typeof printer.CVERSION === 'function'
+                && typeof printer.SET_LICENSES === 'function');
+        }""")
         if ready:
             return True
         page.evaluate("""() => new Promise((resolve, reject) => {
-            if (window.LODOP && typeof window.LODOP.SET_LICENSES === 'function') { resolve(true); return; }
+            const printer = window.LODOP || window.CLODOP;
+            if (printer && typeof printer.CVERSION === 'function'
+                    && typeof printer.SET_LICENSES === 'function') { resolve(true); return; }
             const script = document.createElement('script');
             script.src = 'http://localhost:8000/CLodopfuncs.js';
             script.onload = () => resolve(true);
             script.onerror = () => reject(new Error('无法加载本机 C-Lodop 脚本'));
             document.head.appendChild(script);
         })""")
-        page.wait_for_function("() => !!(window.LODOP && typeof window.LODOP.SET_LICENSES === 'function')", timeout=5000)
+        page.wait_for_function("() => { const printer = window.LODOP || window.CLODOP; return !!(printer && typeof printer.CVERSION === 'function' && typeof printer.SET_LICENSES === 'function'); }", timeout=5000)
         log("已加载本机 C-Lodop 打印组件")
         return True
     except Exception as exc:
@@ -276,7 +282,9 @@ def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] |
     print_button = page.get_by_role("button", name="打印预览").last
     if not print_button.count() or not print_button.is_visible():
         return False
-    ensure_clodop(page, log)
+    if not ensure_clodop(page, log):
+        log(f"未检测到可用的 LODOP/C-Lodop（需要 CVERSION 和 SET_LICENSES），跳过 PDF: {path.name}")
+        return False
     try:
         with page.expect_response(lambda response: "_name=PrintBill" in response.url, timeout=10000) as response_info:
             print_button.click(timeout=5000, no_wait_after=True)
