@@ -500,7 +500,7 @@ def apply_date_filters(filter_table, start: str, end: str, before_search=None) -
     return False
 
 
-def apply_voucher_filters(filter_table, start: str, end: str, before_search=None) -> bool:
+def apply_voucher_filters(page: Page, filter_table, start: str, end: str, before_search=None) -> bool:
     """设置凭证探测器日期范围，并勾选包含已入库。"""
     checkboxes = filter_table.locator("input[type='checkbox']:visible")
     if not checkboxes.count():
@@ -564,12 +564,15 @@ def apply_voucher_filters(filter_table, start: str, end: str, before_search=None
     start_control[2].press("Enter")
     end_control[2].press("Enter")
 
-    search = filter_table.get_by_role("button", name="搜索")
-    if not search.count():
+    confirm = filter_table.get_by_role("button", name="确认")
+    if not confirm.count():
+        confirm = page.get_by_role("button", name="确认").last
+    submit = confirm if confirm.count() and confirm.is_visible() else filter_table.get_by_role("button", name="搜索")
+    if not submit.count():
         return False
     if before_search is not None:
         before_search()
-    search.click(force=True)
+    submit.click(timeout=5000, force=True)
     return True
 
 def apply_sale_date_filters(filter_table, start: str, end: str, before_search=None) -> bool:
@@ -1111,7 +1114,7 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
         filter_table = open_form()
         page.wait_for_timeout(300)
         default_count = len(response_rows)
-        if not apply_voucher_filters(filter_table, start, end, begin_filtered_capture):
+        if not apply_voucher_filters(page, filter_table, start, end, begin_filtered_capture):
             raise RuntimeError(f"{form_name}: 未识别到开始/结束日期或包含已入库筛选条件")
         log(f"{form_name}: 已提交筛选，日期 {start} 至 {end}，包含已入库")
         if default_count:
@@ -1195,6 +1198,15 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
         page.wait_for_timeout(700)
         table = data_grid(page, ("票据号码", "单据日期"))
         table.wait_for(state="visible", timeout=15000)
+        # 凭证探测器的日期条件默认隐藏，必须先打开过滤面板并确认。
+        filter_button = page.get_by_role("button", name="过滤").last
+        if not filter_button.count() or not filter_button.is_visible():
+            filter_button = page.get_by_text("过滤", exact=True).last
+        if not filter_button.count() or not filter_button.is_visible():
+            raise RuntimeError(f"{form_name}: 未找到过滤按钮")
+        filter_button.click(timeout=5000, force=True)
+        page.wait_for_timeout(300)
+        page.wait_for_timeout(300)
         filter_tables = page.locator("table.yc-view-free-table:visible")
         return filter_tables.first if filter_tables.count() else page.locator("table.yc-view-free-table").first
 
