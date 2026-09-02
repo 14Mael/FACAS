@@ -500,6 +500,78 @@ def apply_date_filters(filter_table, start: str, end: str, before_search=None) -
     return False
 
 
+def apply_voucher_filters(filter_table, start: str, end: str, before_search=None) -> bool:
+    """设置凭证探测器日期范围，并勾选包含已入库。"""
+    checkboxes = filter_table.locator("input[type='checkbox']:visible")
+    if not checkboxes.count():
+        return False
+
+    def checkbox_label(checkbox) -> str:
+        try:
+            return clean(checkbox.evaluate("""el => {
+                let node = el;
+                for (let i = 0; i < 8 && node; i++, node = node.parentElement) {
+                    const text = (node.innerText || '').replace(/\\s+/g, '');
+                    if (text) return text;
+                }
+                return '';
+            }"""))
+        except PlaywrightError:
+            return ''
+
+    def find_date_control(labels):
+        for index in range(checkboxes.count()):
+            checkbox = checkboxes.nth(index)
+            label_text = checkbox_label(checkbox)
+            if not any(label in label_text for label in labels):
+                continue
+            container = checkbox.locator("xpath=ancestor::td[1]")
+            date_input = container.locator("input:not([type='checkbox']):visible").first
+            if not date_input.count():
+                container = checkbox.locator("xpath=ancestor::tr[1]")
+                date_input = container.locator("input:not([type='checkbox']):visible").first
+            if date_input.count() and date_input.is_editable():
+                return index, checkbox, date_input
+        return None
+
+    start_control = find_date_control(("单据日期从", "开始日期", "日期从"))
+    end_control = find_date_control(("单据日期到", "结束日期", "日期到"))
+    if start_control is None or end_control is None:
+        return False
+
+    include_index = None
+    include_checkbox = None
+    for index in range(checkboxes.count()):
+        checkbox = checkboxes.nth(index)
+        if "包含已入库" in checkbox_label(checkbox):
+            include_index = index
+            include_checkbox = checkbox
+            break
+    if include_checkbox is None:
+        return False
+
+    # 关闭其他筛选条件，只保留日期范围和包含已入库。
+    keep_indexes = {start_control[0], end_control[0], include_index}
+    for index in range(checkboxes.count()):
+        checkbox = checkboxes.nth(index)
+        if index not in keep_indexes:
+            set_filter_checkbox(checkbox, False)
+    set_filter_checkbox(start_control[1], True)
+    set_filter_checkbox(end_control[1], True)
+    set_filter_checkbox(include_checkbox, True)
+    start_control[2].fill(start)
+    end_control[2].fill(end)
+    start_control[2].press("Enter")
+    end_control[2].press("Enter")
+
+    search = filter_table.get_by_role("button", name="搜索")
+    if not search.count():
+        return False
+    if before_search is not None:
+        before_search()
+    search.click(force=True)
+    return True
+
 def apply_sale_date_filters(filter_table, start: str, end: str, before_search=None) -> bool:
     """Use the stable sales-page checkbox/input pairs from the ERP layout."""
     inputs = filter_table.locator("input:visible")
@@ -696,10 +768,6 @@ def voucher_value(row: dict, header: str) -> str:
     return clean(str(value).replace("\u00a0", " "))
 
 
-def voucher_in_date_range(row: dict, start: str, end: str) -> bool:
-    """Filter voucher rows by the API's bill date field (c3)."""
-    bill_date = voucher_value(row, "单据日期")
-    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", bill_date) and start <= bill_date <= end)
 
 
 def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
@@ -1038,27 +1106,17 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
 
     page.on("response", capture_response)
     try:
-        # Capture the list request emitted while opening the form. The voucher
-        # page has no reliable date-filter controls, so this initial response
-        # is the source dataset that will later be filtered by c3.
+        # 打开页面后先清空默认列表，再提交真实筛选请求。
         capture_enabled = True
         filter_table = open_form()
         page.wait_for_timeout(300)
-        # The form opening request returns the unfiltered default list.
-        # Discard it before applying the requested date range so those
-        # rows cannot leak into the export.
-        if response_rows:
-            log(f"{form_name}: 已丢弃默认列表 {len(response_rows)} 条，准备应用日期筛选")
-        # If opening the form did not emit a list response, retry through the
-        # visible search button as a fallback.
-        if response_count == 0:
-            search = filter_table.get_by_role("button", name="搜索")
-            if not search.count():
-                raise RuntimeError(f"{form_name}: 未捕获 vc_bill_list 响应")
-            begin_filtered_capture()
-            before_search = response_count
-            search.click()
-            wait_for_response(before_search, phase="列表查询")
+        default_count = len(response_rows)
+        if not apply_voucher_filters(filter_table, start, end, begin_filtered_capture):
+            raise RuntimeError(f"{form_name}: 未识别到开始/结束日期或包含已入库筛选条件")
+        log(f"{form_name}: 已提交筛选，日期 {start} 至 {end}，包含已入库")
+        if default_count:
+            log(f"{form_name}: 已忽略打开页面时的默认列表 {default_count} 条")
+        wait_for_response(0, phase="列表查询")
         page_no = 1
         while True:
             log(f"{form_name}: 正在读取第 {page_no} 页")
@@ -1080,8 +1138,8 @@ def collect_voucher_response_rows(page: Page, start: str, end: str, log, form_na
             page_no += 1
         # The PDF pass runs after this listener is detached; preserve the
         # server-reported page count for that second pass.
-        filtered_rows = [row for row in response_rows if voucher_in_date_range(row, start, end)]
-        log(f"{form_name}: 接口读取 {len(response_rows)} 条，按单据日期筛选后 {len(filtered_rows)} 条")
+        filtered_rows = list(response_rows)
+        log(f"{form_name}: 日期筛选接口读取 {len(filtered_rows)} 条")
         setattr(page, "_facas_voucher_response_seen", bool(response_count))
         setattr(page, "_facas_voucher_total_pages", total_pages)
         return filtered_rows
