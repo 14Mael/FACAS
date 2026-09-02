@@ -69,6 +69,30 @@ def clean(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
+def set_filter_checkbox(checkbox, checked: bool) -> None:
+    """设置 ERP 筛选复选框，页面遮罩存在时退回到 DOM 事件。"""
+    if checkbox.is_checked() == checked:
+        return
+    try:
+        # ERP 筛选浮层偶尔会拦截鼠标事件，强制点击可绕过透明遮罩。
+        checkbox.click(force=True, timeout=3000)
+    except PlaywrightError:
+        # 页面动画或遮罩持续存在时，直接触发原生 input/change 事件。
+        checkbox.evaluate(
+            """(el, target) => {
+                const setter = Object.getOwnPropertyDescriptor(
+                    HTMLInputElement.prototype, 'checked'
+                ).set;
+                setter.call(el, target);
+                el.dispatchEvent(new Event('input', {bubbles: true}));
+                el.dispatchEvent(new Event('change', {bubbles: true}));
+            }""",
+            checked,
+        )
+    if checkbox.is_checked() != checked:
+        raise RuntimeError("ERP 筛选条件无法切换")
+
+
 def safe_filename(value: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', "_", clean(value))
 
@@ -462,9 +486,9 @@ def apply_date_filters(filter_table, start: str, end: str, before_search=None) -
     for index in range(checkboxes.count()):
         checkbox = checkboxes.nth(index)
         if checkbox.is_checked():
-            checkbox.uncheck()
+            set_filter_checkbox(checkbox, False)
     for checkbox, date_input, value in date_controls:
-        checkbox.check()
+        set_filter_checkbox(checkbox, True)
         date_input.fill(value)
         date_input.press("Enter")
     search = filter_table.get_by_role("button", name="搜索")
@@ -485,12 +509,12 @@ def apply_sale_date_filters(filter_table, start: str, end: str, before_search=No
     for index in range(inputs.count()):
         control = inputs.nth(index)
         if (control.get_attribute("type") or "").lower() == "checkbox" and control.is_checked():
-            control.uncheck()
+            set_filter_checkbox(control, False)
     for checkbox_index, input_index, value in ((0, 1, start), (6, 7, end)):
         checkbox = inputs.nth(checkbox_index)
         date_input = inputs.nth(input_index)
         if not checkbox.is_checked():
-            checkbox.check()
+            set_filter_checkbox(checkbox, True)
         date_input.fill(value)
         date_input.press("Enter")
     search = filter_table.get_by_role("button", name="搜索")
@@ -781,6 +805,10 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                 raise RuntimeError(f"未捕获{sale_type}第 {page_no} 页 data_list 响应")
             for sale_no, sale_date, payment_date, _customer, _amount, _list_weight in (
                     sale_list_row(sale_type, row) for row in current_rows):
+                if page.is_closed():
+                    raise RuntimeError(
+                        f"{sale_type} 读取销售单 {sale_no} 前 ERP 页面已关闭，请重新打开专用 Edge 后重试"
+                    )
                 if sale_no in seen_sale_nos:
                     continue
                 seen_sale_nos.add(sale_no)
@@ -865,7 +893,7 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                         remove_response_listener(page, capture_detail_response)
                     try:
                         if close is not None and not page.is_closed() and close.count() and close.is_visible():
-                            close.click(timeout=3000)
+                            close.click(timeout=3000, force=True)
                             page.wait_for_timeout(300)
                     except PlaywrightError:
                         log(f"详情关闭失败: {sale_no}")
@@ -1211,7 +1239,7 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
                     close = page.get_by_role("button", name="关闭").last
                     try:
                         if close.count() and close.is_visible():
-                            close.click(timeout=3000)
+                            close.click(timeout=3000, force=True)
                             page.wait_for_timeout(300)
                     except PlaywrightError:
                         log(f"{form_name} 详情关闭失败: {bill_no}")
