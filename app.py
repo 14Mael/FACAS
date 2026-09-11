@@ -2,26 +2,41 @@ from __future__ import annotations
 
 import argparse
 import base64
-import calendar
 import json
 import os
-import queue
 import re
 import socket
 import subprocess
 import sys
-import threading
 import time
 import traceback
-import tkinter as tk
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
+from PySide6.QtCore import QDate, QObject, QThread, Qt, Signal, Slot
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QDateEdit,
+    QFileDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 MODULES = {
@@ -1415,314 +1430,687 @@ def run(start: str, end: str, output: Path, selected: list[str], log,
         return total_count, pdf_count, excel_generated
 
 
-class App(tk.Tk):
+class ExtractionWorker(QObject):
+    """在 Qt 工作线程中执行 ERP 抓取，避免阻塞主界面。"""
+
+    log_message = Signal(str)
+    finished = Signal(int, int, bool)
+    failed = Signal(str, str)
+
+    def __init__(self, start: str, end: str, output: Path, selected: list[str],
+                 pdf_dir: Path | None, selected_forms: list[str] | None,
+                 save_excel: bool, pdf_a5_landscape: bool):
+        super().__init__()
+        self.start = start
+        self.end = end
+        self.output = output
+        self.selected = selected
+        self.pdf_dir = pdf_dir
+        self.selected_forms = selected_forms
+        self.save_excel = save_excel
+        self.pdf_a5_landscape = pdf_a5_landscape
+
+    def log(self, text: str) -> None:
+        self.log_message.emit(str(text))
+
+    @Slot()
+    def execute(self) -> None:
+        try:
+            row_count, pdf_count, excel_generated = run(
+                self.start,
+                self.end,
+                self.output,
+                self.selected,
+                self.log,
+                self.pdf_dir,
+                self.selected_forms,
+                self.save_excel,
+                self.pdf_a5_landscape,
+            )
+            outputs = [
+                "日期范围内未查询到可导出数据"
+                if row_count == 0 else f"共读取 {row_count} 条数据"
+            ]
+            outputs.append("已生成 1 个 Excel" if excel_generated else "未生成 Excel")
+            outputs.append(
+                f"已生成 {pdf_count} 个 PDF"
+                if self.pdf_dir is not None else "未生成 PDF"
+            )
+            message = "；".join(outputs) + "。"
+            self.log(f"完成: {message}")
+            self.log(
+                f"统计: 实际读取 {row_count} 条，Excel "
+                f"{'1' if excel_generated else '0'} 个，PDF "
+                f"{pdf_count if self.pdf_dir is not None else '0'} 个"
+            )
+            if excel_generated:
+                self.log(f"Excel 文件: {self.output}")
+            if self.pdf_dir is not None:
+                self.log(f"PDF 目录: {self.pdf_dir}")
+            self.finished.emit(row_count, pdf_count, excel_generated)
+        except LoginRequired as exc:
+            message = str(exc)
+            self.log(message)
+            self.failed.emit("login", message)
+        except Exception as exc:
+            error_text = str(exc)
+            self.log(f"失败: {error_text}")
+            self.log(f"错误类型: {type(exc).__name__}")
+            self.log(traceback.format_exc().strip())
+            self.failed.emit("error", error_text)
+
+
+MODERN_STYLE = """
+QMainWindow, QWidget#root {
+    background: #f4f7f8;
+    color: #1f2933;
+}
+QFrame#headerCard {
+    background: #11253d;
+    border: 1px solid #1b3855;
+    border-radius: 18px;
+}
+QFrame#accentBar {
+    background: #d97706;
+    border-radius: 3px;
+}
+QLabel#eyebrow {
+    color: #a7c7c7;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QLabel#pageTitle {
+    color: #ffffff;
+    font-size: 22px;
+    font-weight: 700;
+}
+QLabel#pageSubtitle {
+    color: #b7c7d5;
+    font-size: 11px;
+}
+QLabel#versionBadge {
+    background: #193b56;
+    color: #d9f3ef;
+    border: 1px solid #37627d;
+    border-radius: 9px;
+    padding: 5px 10px;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#statusChip {
+    border-radius: 9px;
+    padding: 5px 10px;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#statusChip[state="ready"] {
+    background: #e2f3ed;
+    color: #0f766e;
+}
+QLabel#statusChip[state="running"] {
+    background: #fff1d6;
+    color: #a15c00;
+}
+QLabel#statusChip[state="success"] {
+    background: #d9f5e7;
+    color: #18794e;
+}
+QLabel#statusChip[state="error"] {
+    background: #fde8e7;
+    color: #b42318;
+}
+QFrame#card {
+    background: #ffffff;
+    border: 1px solid #d9e1e5;
+    border-radius: 14px;
+}
+QFrame#subCard {
+    background: #f7fafb;
+    border: 1px solid #e1e8eb;
+    border-radius: 10px;
+}
+QLabel#cardTitle {
+    color: #1f2933;
+    font-size: 12px;
+    font-weight: 700;
+}
+QLabel#cardHint {
+    color: #7a8791;
+    font-size: 10px;
+}
+QLabel#subTitle {
+    color: #40505c;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLabel#fieldLabel {
+    color: #66737e;
+    font-size: 10px;
+    font-weight: 600;
+}
+QLineEdit, QDateEdit {
+    background: #ffffff;
+    border: 1px solid #cbd5dc;
+    border-radius: 8px;
+    padding: 7px 10px;
+    min-height: 19px;
+    selection-background-color: #b9e4dc;
+}
+QLineEdit:focus, QDateEdit:focus {
+    border: 1px solid #0f766e;
+}
+QLineEdit:disabled, QDateEdit:disabled {
+    background: #edf1f3;
+    color: #98a4ad;
+}
+QCheckBox {
+    color: #34424d;
+    spacing: 8px;
+    padding: 3px 0;
+}
+QCheckBox:checked {
+    color: #0f766e;
+    font-weight: 700;
+}
+QCheckBox::indicator {
+    width: 17px;
+    height: 17px;
+    border: 1px solid #b7c5cc;
+    border-radius: 5px;
+    background: #ffffff;
+}
+QCheckBox::indicator:hover {
+    border: 1px solid #0f766e;
+}
+QCheckBox::indicator:checked {
+    background: #0f766e;
+    border: 1px solid #0f766e;
+}
+QPushButton {
+    border: 1px solid #cbd5dc;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #40505c;
+    padding: 7px 12px;
+    font-weight: 600;
+}
+QPushButton:hover {
+    background: #eef6f5;
+    border-color: #83bdb4;
+}
+QPushButton:pressed {
+    background: #dceeea;
+}
+QPushButton:disabled {
+    background: #edf1f3;
+    color: #9aa5ad;
+    border-color: #dfe5e8;
+}
+QPushButton#primaryButton {
+    background: #0f766e;
+    color: #ffffff;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 24px;
+    font-size: 11px;
+    font-weight: 700;
+}
+QPushButton#primaryButton:hover {
+    background: #115e59;
+}
+QPushButton#primaryButton:pressed {
+    background: #0b4f4a;
+}
+QPushButton#primaryButton:disabled {
+    background: #9ac8c2;
+    color: #eaf7f5;
+}
+QPushButton#quietButton {
+    background: #edf3f4;
+    border: 1px solid #d6e1e3;
+    color: #52616b;
+    padding: 6px 10px;
+    font-size: 10px;
+}
+QPlainTextEdit#logView {
+    background: #17232b;
+    color: #d6f5ef;
+    border: none;
+    border-radius: 10px;
+    padding: 12px;
+    selection-background-color: #24545a;
+}
+QProgressBar {
+    border: none;
+    background: #e2ecec;
+    border-radius: 3px;
+    min-height: 6px;
+    max-height: 6px;
+}
+QProgressBar::chunk {
+    background: #0f766e;
+    border-radius: 3px;
+}
+"""
+
+
+class App(QMainWindow):
+    """PySide6 主界面，负责交互、配置和后台任务调度。"""
+
     def __init__(self):
         super().__init__()
-        self.run_lock = threading.Lock()
-        self.log_queue: queue.Queue[str] = queue.Queue()
-        self.running = False
-        self.start_button = None
-        self.title(f"报废汽车财务数据自动化处理 {APP_VERSION}")
-        self.geometry("860x560")
-        self.minsize(760, 500)
-        today = date.today().isoformat()
-        self.start = tk.StringVar(value=today)
-        self.end = tk.StringVar(value=today)
-        app_dir = application_dir()
-        self.app_dir = app_dir
-        # Generated business files live below the application folder by default.
-        # User-selected paths are preserved by load_settings().
-        output_root = app_dir / "output"
+        self.setObjectName("mainWindow")
+        self.setWindowTitle(f"报废汽车财务数据自动化处理 {APP_VERSION}")
+        self.resize(1180, 780)
+        self.setMinimumSize(980, 680)
+        self.setStyleSheet(MODERN_STYLE)
+
+        self.app_dir = application_dir()
+        output_root = self.app_dir / "output"
         self.default_output = output_root / "Excel" / "销售数据.xlsx"
         self.default_pdf_dir = output_root / "PDF"
-        self.output = tk.StringVar(value=str(self.default_output))
-        self.pdf_dir = tk.StringVar(value=str(self.default_pdf_dir))
-        self.save_pdfs = tk.BooleanVar(value=True)
-        self.pdf_a5_landscape = tk.BooleanVar(value=False)
-        self.save_excel = tk.BooleanVar(value=True)
-        self.vars = {name: tk.BooleanVar(value=True) for name in MODULES}
-        self.form_vars = {name: tk.BooleanVar(value=False) for name in FORM_MODULES}
-        self.settings_path = app_dir / "facas-settings.json"
-        self.log_dir = app_dir / "log"
-        self.run_log_path = self.log_dir / f"{date.today().isoformat()}.log"
+        self.settings_path = self.app_dir / "facas-settings.json"
+        self.log_dir = self.app_dir / "log"
+        self.running = False
+        self.thread: QThread | None = None
+        self.worker: ExtractionWorker | None = None
+
+        self._build_ui()
         self.load_settings()
-        self.log_box = None
-        self.build()
-        self._log(f"程序已启动，日志文件: {self.run_log_path}")
-        self.after(100, self.flush_log_queue)
-        self.after_idle(self.center_window)
+        self._update_output_controls()
+        self._center_window()
+        self.log(f"程序已启动，日志文件: {self.log_dir / f'{date.today().isoformat()}.log'}")
 
-    def build(self):
-        frame = ttk.Frame(self, padding=(20, 18, 20, 16))
-        frame.pack(fill="both", expand=True)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(3, weight=1)
+    def _card(self, title: str, hint: str = "") -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(10)
+        title_row = QHBoxLayout()
+        title_label = QLabel(title)
+        title_label.setObjectName("cardTitle")
+        title_row.addWidget(title_label)
+        title_row.addStretch(1)
+        if hint:
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("cardHint")
+            title_row.addWidget(hint_label)
+        layout.addLayout(title_row)
+        return card, layout
 
-        heading = ttk.Label(frame, text="销售数据自动化处理", font=("Microsoft YaHei UI", 16, "bold"))
-        heading.grid(row=0, column=0, sticky="w", pady=(0, 12))
+    @staticmethod
+    def _field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("fieldLabel")
+        return label
 
-        query = ttk.LabelFrame(frame, text="查询条件", padding=(14, 10))
-        query.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        query.columnconfigure(1, weight=1)
-        query.columnconfigure(3, weight=1)
-        ttk.Label(query, text="开始日期").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.date_control(query, self.start, 1)
-        ttk.Label(query, text="结束日期").grid(row=0, column=2, sticky="w", padx=(20, 8), pady=4)
-        self.date_control(query, self.end, 3)
-        selection = ttk.LabelFrame(query, text="数据范围", padding=(10, 8))
-        selection.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(12, 0))
-        selection.columnconfigure(0, weight=1)
-        selection.columnconfigure(1, weight=1)
-        selection_actions = ttk.Frame(selection)
-        selection_actions.grid(row=0, column=0, columnspan=2, sticky="e", pady=(0, 6))
-        ttk.Button(selection_actions, text="全选全部", command=lambda: self.set_categories(True), width=9).pack(side="left", padx=(0, 6))
-        ttk.Button(selection_actions, text="清空全部", command=lambda: self.set_categories(False), width=9).pack(side="left")
-        sales_box = ttk.LabelFrame(selection, text="销售管理", padding=(10, 6))
-        sales_box.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
-        vouchers_box = ttk.LabelFrame(selection, text="凭证探测器", padding=(10, 6))
-        vouchers_box.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
-        for row, name in enumerate(MODULES):
-            ttk.Checkbutton(sales_box, text=name, variable=self.vars[name]).grid(row=row, column=0, sticky="w", pady=2)
-        for row, name in enumerate(FORM_MODULES):
-            ttk.Checkbutton(vouchers_box, text=name, variable=self.form_vars[name]).grid(row=row, column=0, sticky="w", pady=2)
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(26, 24, 26, 22)
+        outer.setSpacing(16)
 
-        output = ttk.LabelFrame(frame, text="输出设置", padding=(14, 10))
-        output.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        output.columnconfigure(3, weight=1)
-        ttk.Checkbutton(output, text="Excel", variable=self.save_excel).grid(
-            row=0, column=0, sticky="w", padx=(0, 12), pady=5
+        header = QFrame()
+        header.setObjectName("headerCard")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 18, 20, 18)
+        header_layout.setSpacing(14)
+        accent = QFrame()
+        accent.setObjectName("accentBar")
+        accent.setFixedWidth(5)
+        header_layout.addWidget(accent)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
+        eyebrow = QLabel("FACAS  /  INTERNAL AUTOMATION")
+        eyebrow.setObjectName("eyebrow")
+        title_box.addWidget(eyebrow)
+        title = QLabel("财务数据自动化处理")
+        title.setObjectName("pageTitle")
+        title_box.addWidget(title)
+        subtitle = QLabel("销售与凭证数据采集  ·  Excel / PDF 输出")
+        subtitle.setObjectName("pageSubtitle")
+        title_box.addWidget(subtitle)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch(1)
+        meta = QVBoxLayout()
+        meta.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        version = QLabel(APP_VERSION)
+        version.setObjectName("versionBadge")
+        version.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        meta.addWidget(version, alignment=Qt.AlignmentFlag.AlignRight)
+        self.status_chip = QLabel("就绪")
+        self.status_chip.setObjectName("statusChip")
+        self.status_chip.setProperty("state", "ready")
+        self.status_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        meta.addWidget(self.status_chip, alignment=Qt.AlignmentFlag.AlignRight)
+        header_layout.addLayout(meta)
+        outer.addWidget(header)
+
+        content = QHBoxLayout()
+        content.setSpacing(16)
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
+        left.setMinimumWidth(470)
+        left.setMaximumWidth(560)
+
+        query_card, query_layout = self._card("查询范围", "销售和凭证均按此日期执行")
+        date_row = QHBoxLayout()
+        date_row.setSpacing(8)
+        date_row.addWidget(self._field_label("开始日期"))
+        self.start_date = QDateEdit(QDate.currentDate())
+        self.start_date.setCalendarPopup(True)
+        self.start_date.setDisplayFormat("yyyy-MM-dd")
+        self.start_date.setFixedWidth(138)
+        date_row.addWidget(self.start_date)
+        date_row.addSpacing(12)
+        date_row.addWidget(self._field_label("结束日期"))
+        self.end_date = QDateEdit(QDate.currentDate())
+        self.end_date.setCalendarPopup(True)
+        self.end_date.setDisplayFormat("yyyy-MM-dd")
+        self.end_date.setFixedWidth(138)
+        date_row.addWidget(self.end_date)
+        date_row.addStretch(1)
+        query_layout.addLayout(date_row)
+        left_layout.addWidget(query_card)
+
+        scope_card, scope_layout = self._card("数据范围", "可同时选择销售分类和凭证类型")
+        scope_actions = QHBoxLayout()
+        scope_actions.addStretch(1)
+        self.select_all_button = QPushButton("全选")
+        self.select_all_button.setObjectName("quietButton")
+        self.select_all_button.clicked.connect(lambda: self.set_categories(True))
+        self.clear_all_button = QPushButton("清空")
+        self.clear_all_button.setObjectName("quietButton")
+        self.clear_all_button.clicked.connect(lambda: self.set_categories(False))
+        scope_actions.addWidget(self.select_all_button)
+        scope_actions.addWidget(self.clear_all_button)
+        scope_layout.addLayout(scope_actions)
+        groups = QGridLayout()
+        groups.setHorizontalSpacing(10)
+        groups.setVerticalSpacing(10)
+        self.category_checks: dict[str, QCheckBox] = {}
+        self.form_checks: dict[str, QCheckBox] = {}
+        sales_group = self._selection_group("销售管理", MODULES, self.category_checks, True)
+        voucher_group = self._selection_group("凭证探测器", FORM_MODULES, self.form_checks, False)
+        groups.addWidget(sales_group, 0, 0)
+        groups.addWidget(voucher_group, 0, 1)
+        groups.setColumnStretch(0, 1)
+        groups.setColumnStretch(1, 1)
+        scope_layout.addLayout(groups)
+        left_layout.addWidget(scope_card)
+
+        output_card, output_layout = self._card("输出设置", "文件只会在对应开关开启时生成")
+        excel_row = QHBoxLayout()
+        self.save_excel = QCheckBox("生成 Excel")
+        self.save_excel.setChecked(True)
+        self.save_excel.toggled.connect(self._update_output_controls)
+        excel_row.addWidget(self.save_excel)
+        self.output_edit = QLineEdit(str(self.default_output))
+        self.output_edit.setPlaceholderText("选择 Excel 输出文件")
+        excel_row.addWidget(self.output_edit, 1)
+        self.output_browse = QPushButton("选择文件")
+        self.output_browse.clicked.connect(self.choose_output)
+        excel_row.addWidget(self.output_browse)
+        output_layout.addLayout(excel_row)
+
+        pdf_row = QHBoxLayout()
+        self.save_pdfs = QCheckBox("生成 PDF")
+        self.save_pdfs.setChecked(True)
+        self.save_pdfs.toggled.connect(self._update_output_controls)
+        pdf_row.addWidget(self.save_pdfs)
+        self.pdf_dir_edit = QLineEdit(str(self.default_pdf_dir))
+        self.pdf_dir_edit.setPlaceholderText("选择 PDF 输出目录")
+        pdf_row.addWidget(self.pdf_dir_edit, 1)
+        self.pdf_browse = QPushButton("选择目录")
+        self.pdf_browse.clicked.connect(self.choose_pdf_dir)
+        pdf_row.addWidget(self.pdf_browse)
+        output_layout.addLayout(pdf_row)
+
+        pdf_options = QHBoxLayout()
+        pdf_options.setContentsMargins(92, 0, 0, 0)
+        self.pdf_a5_landscape = QCheckBox("A5 横版")
+        self.pdf_a5_landscape.setChecked(False)
+        pdf_options.addWidget(self.pdf_a5_landscape)
+        pdf_options.addWidget(QLabel("未勾选时使用 A4 竖版"))
+        pdf_options.addStretch(1)
+        output_layout.addLayout(pdf_options)
+        left_layout.addWidget(output_card)
+        left_layout.addStretch(1)
+
+        log_card, log_layout = self._card("运行日志", "按日期保存在 log 文件夹")
+        log_toolbar = QHBoxLayout()
+        log_toolbar.addStretch(1)
+        self.clear_log_button = QPushButton("清空显示")
+        self.clear_log_button.setObjectName("quietButton")
+        self.clear_log_button.clicked.connect(self.clear_log_view)
+        log_toolbar.addWidget(self.clear_log_button)
+        log_layout.addLayout(log_toolbar)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("logView")
+        self.log_view.setReadOnly(True)
+        self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.log_view.setMaximumBlockCount(2500)
+        self.log_view.setFont(QFont("Cascadia Mono", 9))
+        log_layout.addWidget(self.log_view, 1)
+        content.addWidget(left)
+        content.addWidget(log_card, 1)
+        outer.addLayout(content, 1)
+
+        action_bar = QFrame()
+        action_bar.setObjectName("card")
+        action_layout = QHBoxLayout(action_bar)
+        action_layout.setContentsMargins(16, 10, 16, 10)
+        self.task_status = QLabel("准备就绪，选择日期和数据范围后开始")
+        self.task_status.setObjectName("cardHint")
+        action_layout.addWidget(self.task_status)
+        action_layout.addStretch(1)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setFixedWidth(150)
+        self.progress.setVisible(False)
+        action_layout.addWidget(self.progress)
+        self.start_button = QPushButton("开始提取")
+        self.start_button.setObjectName("primaryButton")
+        self.start_button.setMinimumWidth(140)
+        self.start_button.clicked.connect(self.start_run)
+        action_layout.addWidget(self.start_button)
+        outer.addWidget(action_bar)
+
+        self.task_controls = [
+            self.start_date,
+            self.end_date,
+            *self.category_checks.values(),
+            *self.form_checks.values(),
+            self.save_excel,
+            self.output_edit,
+            self.output_browse,
+            self.save_pdfs,
+            self.pdf_dir_edit,
+            self.pdf_browse,
+            self.pdf_a5_landscape,
+            self.select_all_button,
+            self.clear_all_button,
+            self.start_button,
+        ]
+
+    @staticmethod
+    def _selection_group(title: str, values: dict[str, str], storage: dict[str, QCheckBox], default: bool) -> QFrame:
+        group = QFrame()
+        group.setObjectName("subCard")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(2)
+        label = QLabel(title)
+        label.setObjectName("subTitle")
+        layout.addWidget(label)
+        for name in values:
+            check = QCheckBox(name)
+            check.setChecked(default)
+            storage[name] = check
+            layout.addWidget(check)
+        layout.addStretch(1)
+        return group
+
+    def _center_window(self) -> None:
+        screen = self.screen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        self.move(available.center() - self.rect().center())
+
+    def _update_output_controls(self) -> None:
+        excel_enabled = self.save_excel.isChecked()
+        pdf_enabled = self.save_pdfs.isChecked()
+        self.output_edit.setEnabled(excel_enabled and not self.running)
+        self.output_browse.setEnabled(excel_enabled and not self.running)
+        self.pdf_dir_edit.setEnabled(pdf_enabled and not self.running)
+        self.pdf_browse.setEnabled(pdf_enabled and not self.running)
+        self.pdf_a5_landscape.setEnabled(pdf_enabled and not self.running)
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        for control in self.task_controls:
+            control.setEnabled(enabled)
+        self._update_output_controls()
+
+    def set_categories(self, enabled: bool) -> None:
+        for check in [*self.category_checks.values(), *self.form_checks.values()]:
+            check.setChecked(enabled)
+
+    def choose_output(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择 Excel 输出文件",
+            self.output_edit.text(),
+            "Excel 文件 (*.xlsx)",
         )
-        ttk.Label(output, text="文件").grid(row=0, column=1, sticky="w", padx=(0, 10), pady=5)
-        ttk.Entry(output, textvariable=self.output).grid(
-            row=0, column=2, columnspan=2, sticky="ew", pady=5
-        )
-        ttk.Button(output, text="选择文件", command=self.choose).grid(
-            row=0, column=4, padx=(10, 0), pady=5
-        )
-        ttk.Checkbutton(output, text="PDF", variable=self.save_pdfs).grid(
-            row=1, column=0, sticky="w", padx=(0, 12), pady=5
-        )
-        ttk.Checkbutton(output, text="A5横版", variable=self.pdf_a5_landscape).grid(
-            row=1, column=1, sticky="w", padx=(0, 10), pady=5
-        )
-        ttk.Label(output, text="目录").grid(row=1, column=2, sticky="w", padx=(0, 10), pady=5)
-        ttk.Entry(output, textvariable=self.pdf_dir).grid(row=1, column=3, sticky="ew", pady=5)
-        ttk.Button(output, text="选择目录", command=self.choose_pdf_dir).grid(
-            row=1, column=4, padx=(10, 0), pady=5
-        )
-
-        log_frame = ttk.LabelFrame(frame, text="运行日志", padding=(8, 8))
-        log_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        self.log_box = tk.Listbox(
-            log_frame,
-            height=5,
-            bg="#ffffff",
-            fg="#111827",
-            selectbackground="#dbeafe",
-            selectforeground="#111827",
-            font=("Microsoft YaHei UI", 10),
-            activestyle="none",
-            borderwidth=0,
-            highlightthickness=0,
-        )
-        self.log_box.grid(row=0, column=0, sticky="nsew")
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_box.yview)
-        log_scroll.grid(row=0, column=1, sticky="ns")
-        self.log_box.configure(yscrollcommand=log_scroll.set)
-
-        actions = ttk.Frame(frame)
-        actions.grid(row=4, column=0, sticky="ew")
-        self.start_button = ttk.Button(actions, text="开始提取", command=self.start_run)
-        self.start_button.pack(side="right", ipadx=16, ipady=3)
-
-    def center_window(self):
-        self.update_idletasks()
-        width, height = self.winfo_width(), self.winfo_height()
-        x = max(0, (self.winfo_screenwidth() - width) // 2)
-        y = max(0, (self.winfo_screenheight() - height) // 2)
-        self.geometry(f"{width}x{height}+{x}+{y}")
-
-    def date_control(self, parent, variable, column):
-        box = ttk.Frame(parent)
-        box.grid(row=0, column=column, padx=8, sticky="w")
-        ttk.Entry(box, textvariable=variable, width=12, state="readonly").pack(side="left")
-        ttk.Button(box, text="选择日期", command=lambda: self.pick_date(variable)).pack(side="left", padx=(4, 0))
-
-    def pick_date(self, variable):
-        try:
-            selected = datetime.strptime(variable.get(), "%Y-%m-%d").date()
-        except ValueError:
-            selected = date.today()
-        dialog = tk.Toplevel(self)
-        dialog.title("选择日期")
-        dialog.transient(self)
-        dialog.grab_set()
-        year = tk.IntVar(value=selected.year)
-        month = tk.IntVar(value=selected.month)
-        ttk.Label(dialog, text="年").grid(row=0, column=0, padx=4, pady=8)
-        ttk.Spinbox(dialog, from_=2000, to=2100, textvariable=year, width=6).grid(row=0, column=1)
-        ttk.Label(dialog, text="月").grid(row=0, column=2, padx=4)
-        ttk.Spinbox(dialog, from_=1, to=12, textvariable=month, width=4, command=lambda: render()).grid(row=0, column=3)
-        calendar_frame = ttk.Frame(dialog)
-        calendar_frame.grid(row=1, column=0, columnspan=4, padx=8, pady=4)
-
-        def render():
-            for child in calendar_frame.winfo_children():
-                child.destroy()
-            try:
-                current_year, current_month = int(year.get()), int(month.get())
-                month_days = calendar.monthcalendar(current_year, current_month)
-            except (ValueError, calendar.IllegalMonthError):
-                return
-            for col, name in enumerate(("一", "二", "三", "四", "五", "六", "日")):
-                ttk.Label(calendar_frame, text=name, width=4, anchor="center").grid(row=0, column=col)
-            for row_index, week in enumerate(month_days, 1):
-                for col, day in enumerate(week):
-                    if day:
-                        ttk.Button(calendar_frame, text=str(day), width=4,
-                                   command=lambda d=day: choose(d)).grid(row=row_index, column=col, padx=1, pady=1)
-
-        def choose(day):
-            variable.set(f"{int(year.get()):04d}-{int(month.get()):02d}-{day:02d}")
-            dialog.destroy()
-
-        year.trace_add("write", lambda *_: render())
-        month.trace_add("write", lambda *_: render())
-        render()
-
-        # Tk places a newly-created Toplevel at the screen origin unless a
-        # geometry is supplied.  Size it after rendering the calendar, then
-        # center it on the main window (with a screen-centered fallback).
-        dialog.update_idletasks()
-        width = dialog.winfo_reqwidth()
-        height = dialog.winfo_reqheight()
-        parent_x = self.winfo_rootx()
-        parent_y = self.winfo_rooty()
-        parent_width = self.winfo_width()
-        parent_height = self.winfo_height()
-        if parent_width <= 1 or parent_height <= 1:
-            parent_x = (dialog.winfo_screenwidth() - width) // 2
-            parent_y = (dialog.winfo_screenheight() - height) // 2
-        else:
-            parent_x += max(0, (parent_width - width) // 2)
-            parent_y += max(0, (parent_height - height) // 2)
-        # Keep the dialog visible when the main window is near a screen edge.
-        screen_width = dialog.winfo_screenwidth()
-        screen_height = dialog.winfo_screenheight()
-        parent_x = max(0, min(parent_x, screen_width - width))
-        parent_y = max(0, min(parent_y, screen_height - height))
-        dialog.geometry(f"{width}x{height}+{parent_x}+{parent_y}")
-        dialog.focus_set()
-
-    def choose(self):
-        path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
-        if path: self.output.set(path)
-
-    def choose_pdf_dir(self):
-        path = filedialog.askdirectory()
         if path:
-            self.pdf_dir.set(path)
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            self.output_edit.setText(path)
 
-    def set_categories(self, enabled):
-        for variable in self.vars.values():
-            variable.set(enabled)
-        for variable in self.form_vars.values():
-            variable.set(enabled)
+    def choose_pdf_dir(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择 PDF 输出目录", self.pdf_dir_edit.text())
+        if path:
+            self.pdf_dir_edit.setText(path)
 
-    def load_settings(self):
+    def load_settings(self) -> None:
         try:
             settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        for key, variable in (("start", self.start), ("end", self.end)):
-            if settings.get(key):
-                variable.set(settings[key])
-        # Migrate paths written by older versions, but never overwrite a
-        # custom path selected by the user.
+        for key, control in (("start", self.start_date), ("end", self.end_date)):
+            value = settings.get(key)
+            parsed = QDate.fromString(str(value), "yyyy-MM-dd") if value else QDate()
+            if parsed.isValid():
+                control.setDate(parsed)
         old_default_output = self.app_dir / "销售数据.xlsx"
         old_default_pdf_dir = self.app_dir / "销售单据PDF"
         stored_output = settings.get("output")
         if stored_output:
             stored_path = Path(stored_output)
-            self.output.set(str(self.default_output) if stored_path == old_default_output else stored_output)
+            output = self.default_output if stored_path == old_default_output else stored_path
+            self.output_edit.setText(str(output))
         stored_pdf_dir = settings.get("pdf_dir")
         if stored_pdf_dir:
             stored_path = Path(stored_pdf_dir)
-            self.pdf_dir.set(str(self.default_pdf_dir) if stored_path == old_default_pdf_dir else stored_pdf_dir)
-        if "save_pdfs" in settings:
-            self.save_pdfs.set(bool(settings["save_pdfs"]))
-        if "pdf_a5_landscape" in settings:
-            self.pdf_a5_landscape.set(bool(settings["pdf_a5_landscape"]))
-        if "save_excel" in settings:
-            self.save_excel.set(bool(settings["save_excel"]))
-        for name, variable in self.vars.items():
+            pdf_dir = self.default_pdf_dir if stored_path == old_default_pdf_dir else stored_path
+            self.pdf_dir_edit.setText(str(pdf_dir))
+        self.save_pdfs.setChecked(bool(settings.get("save_pdfs", True)))
+        self.pdf_a5_landscape.setChecked(bool(settings.get("pdf_a5_landscape", False)))
+        self.save_excel.setChecked(bool(settings.get("save_excel", True)))
+        for name, check in self.category_checks.items():
             if name in settings.get("categories", {}):
-                variable.set(bool(settings["categories"][name]))
-        for name, variable in self.form_vars.items():
+                check.setChecked(bool(settings["categories"][name]))
+        for name, check in self.form_checks.items():
             if name in settings.get("forms", {}):
-                variable.set(bool(settings["forms"][name]))
+                check.setChecked(bool(settings["forms"][name]))
 
-    def save_settings(self):
+    def save_settings(self) -> None:
         settings = {
-            "start": self.start.get(), "end": self.end.get(),
-            "output": self.output.get(), "pdf_dir": self.pdf_dir.get(),
-            "save_pdfs": self.save_pdfs.get(),
-            "pdf_a5_landscape": self.pdf_a5_landscape.get(),
-            "save_excel": self.save_excel.get(),
-            "categories": {name: variable.get() for name, variable in self.vars.items()},
-            "forms": {name: variable.get() for name, variable in self.form_vars.items()},
+            "start": self.start_date.date().toString("yyyy-MM-dd"),
+            "end": self.end_date.date().toString("yyyy-MM-dd"),
+            "output": self.output_edit.text(),
+            "pdf_dir": self.pdf_dir_edit.text(),
+            "save_pdfs": self.save_pdfs.isChecked(),
+            "pdf_a5_landscape": self.pdf_a5_landscape.isChecked(),
+            "save_excel": self.save_excel.isChecked(),
+            "categories": {name: check.isChecked() for name, check in self.category_checks.items()},
+            "forms": {name: check.isChecked() for name, check in self.form_checks.items()},
         }
         try:
-            self.settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.settings_path.write_text(
+                json.dumps(settings, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except OSError:
             pass
 
-    def log(self, text):
+    def log(self, text: str) -> None:
         timestamped = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {text}"
         try:
             self.log_dir.mkdir(parents=True, exist_ok=True)
-            self.run_log_path = self.log_dir / f"{date.today().isoformat()}.log"
-            with self.run_log_path.open("a", encoding="utf-8") as handle:
+            run_log_path = self.log_dir / f"{date.today().isoformat()}.log"
+            with run_log_path.open("a", encoding="utf-8") as handle:
                 handle.write(timestamped + "\n")
         except OSError:
             pass
-        self.log_queue.put(timestamped)
+        if hasattr(self, "log_view"):
+            self.log_view.appendPlainText(timestamped)
+            scrollbar = self.log_view.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
 
-    def _log(self, text):
-        self.log_box.insert("end", text.rstrip("\n") + "\n")
-        self.log_box.see("end")
+    def clear_log_view(self) -> None:
+        self.log_view.clear()
+        self.log_view.appendPlainText("界面日志已清空，完整记录仍保存在 log 文件夹。")
 
-    def flush_log_queue(self):
-        try:
-            while True:
-                self._log(self.log_queue.get_nowait())
-        except queue.Empty:
-            pass
-        self.after(100, self.flush_log_queue)
+    def _set_status(self, text: str, state: str, detail: str | None = None) -> None:
+        self.status_chip.setText(text)
+        self.status_chip.setProperty("state", state)
+        self.status_chip.style().unpolish(self.status_chip)
+        self.status_chip.style().polish(self.status_chip)
+        if detail:
+            self.task_status.setText(detail)
 
-    def start_run(self):
-        if not self.run_lock.acquire(blocking=False):
-            messagebox.showwarning("提示", "已有任务正在运行，请等待当前任务完成")
+    def start_run(self) -> None:
+        if self.running:
             return
-        selected = [name for name, var in self.vars.items() if var.get()]
-        selected_forms = [name for name, var in self.form_vars.items() if var.get()]
+        selected = [name for name, check in self.category_checks.items() if check.isChecked()]
+        selected_forms = [name for name, check in self.form_checks.items() if check.isChecked()]
         if not selected and not selected_forms:
-            self.run_lock.release()
-            messagebox.showwarning("提示", "至少选择一个销售分类或凭证类型")
+            QMessageBox.warning(self, "提示", "至少选择一个销售分类或凭证类型")
             return
+        start = self.start_date.date().toString("yyyy-MM-dd")
+        end = self.end_date.date().toString("yyyy-MM-dd")
+        if start > end:
+            QMessageBox.warning(self, "日期范围错误", "开始日期不能晚于结束日期")
+            return
+        save_excel = self.save_excel.isChecked()
+        save_pdfs = self.save_pdfs.isChecked()
+        output_text = self.output_edit.text().strip()
+        pdf_dir_text = self.pdf_dir_edit.text().strip()
+        if save_excel and not output_text:
+            QMessageBox.warning(self, "输出设置不完整", "请先选择 Excel 输出文件")
+            return
+        if save_pdfs and not pdf_dir_text:
+            QMessageBox.warning(self, "输出设置不完整", "请先选择 PDF 输出目录")
+            return
+
         self.save_settings()
+        output = Path(output_text or self.default_output)
+        pdf_dir = Path(pdf_dir_text) if save_pdfs else None
+        pdf_a5_landscape = self.pdf_a5_landscape.isChecked()
         self.running = True
-        if self.start_button is not None:
-            self.start_button.configure(state="disabled")
-        start = self.start.get()
-        end = self.end.get()
-        output = Path(self.output.get())
-        pdf_dir = Path(self.pdf_dir.get()) if self.save_pdfs.get() else None
-        pdf_a5_landscape = self.pdf_a5_landscape.get()
-        save_excel = self.save_excel.get()
-        self.log(f"任务已启动，日期范围: {self.start.get()} 至 {self.end.get()}")
+        self._set_controls_enabled(False)
+        self.start_button.setText("正在提取…")
+        self.progress.setVisible(True)
+        self._set_status("运行中", "running", "正在连接 ERP 并执行任务…")
+        self.log(f"任务已启动，日期范围: {start} 至 {end}")
         self.log(f"销售分类: {', '.join(selected) if selected else '未选择'}")
         self.log(f"凭证类型: {', '.join(selected_forms) if selected_forms else '未选择'}")
         pdf_status = "关闭"
@@ -1733,45 +2121,87 @@ class App(tk.Tk):
             self.log(f"Excel 路径: {output}")
         if pdf_dir is not None:
             self.log(f"PDF 目录: {pdf_dir}")
-        threading.Thread(
-            target=self.worker,
-            args=(selected, selected_forms, start, end, output, pdf_dir, save_excel, pdf_a5_landscape),
-            daemon=True,
-        ).start()
 
-    def worker(self, selected, selected_forms, start, end, output, pdf_dir, save_excel, pdf_a5_landscape):
-        try:
-            row_count, pdf_count, excel_generated = run(
-                start, end, output, selected, self.log, pdf_dir, selected_forms,
-                save_excel, pdf_a5_landscape)
-            outputs = ["日期范围内未查询到可导出数据" if row_count == 0 else f"共读取 {row_count} 条数据"]
-            outputs.append("已生成 1 个 Excel" if excel_generated else "未生成 Excel")
-            outputs.append(f"已生成 {pdf_count} 个 PDF" if pdf_dir is not None else "未生成 PDF")
-            message = "；".join(outputs) + "。"
-            self.log(f"完成: {message}")
-            self.log(f"统计: 实际读取 {row_count} 条，Excel {'1' if excel_generated else '0'} 个，PDF {pdf_count if pdf_dir is not None else '0'} 个")
-            if excel_generated:
-                self.log(f"Excel 文件: {output}")
-            if pdf_dir is not None:
-                self.log(f"PDF 目录: {pdf_dir}")
-            open_path = output.parent if excel_generated else (pdf_dir if pdf_count else None)
-            if open_path is not None:
-                self.after(0, lambda path=open_path: open_output_directory(path))
-            self.after(0, lambda text=message: messagebox.showinfo("完成", text))
-        except LoginRequired as exc:
-            message = str(exc)
-            self.log(message)
-            self.after(0, lambda text=message: messagebox.showinfo("请先登录 ERP", text))
-        except Exception as exc:
-            error_text = str(exc)
-            self.log(f"失败: {error_text}")
-            self.log(f"错误类型: {type(exc).__name__}")
-            self.log(traceback.format_exc().strip())
-            self.after(0, lambda text=error_text: messagebox.showerror("失败", text))
-        finally:
-            self.run_lock.release()
-            self.running = False
-            self.after(0, lambda: self.start_button.configure(state="normal") if self.start_button is not None else None)
+        self.thread = QThread(self)
+        self.worker = ExtractionWorker(
+            start,
+            end,
+            output,
+            selected,
+            pdf_dir,
+            selected_forms,
+            save_excel,
+            pdf_a5_landscape,
+        )
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.execute)
+        self.worker.log_message.connect(self.log)
+        self.worker.finished.connect(self._task_finished)
+        self.worker.failed.connect(self._task_failed)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.failed.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.worker.failed.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self._thread_finished)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.thread.start()
+
+    @Slot(int, int, bool)
+    def _task_finished(self, row_count: int, pdf_count: int, excel_generated: bool) -> None:
+        outputs = [
+            "日期范围内未查询到可导出数据"
+            if row_count == 0 else f"共读取 {row_count} 条数据"
+        ]
+        outputs.append("已生成 1 个 Excel" if excel_generated else "未生成 Excel")
+        outputs.append(
+            f"已生成 {pdf_count} 个 PDF"
+            if self.save_pdfs.isChecked() else "未生成 PDF"
+        )
+        message = "；".join(outputs) + "。"
+        self._set_status("已完成", "success", message)
+        if excel_generated:
+            open_output_directory(Path(self.output_edit.text()))
+        elif self.save_pdfs.isChecked() and pdf_count:
+            open_output_directory(Path(self.pdf_dir_edit.text()))
+        QMessageBox.information(self, "任务完成", message)
+
+    @Slot(str, str)
+    def _task_failed(self, kind: str, message: str) -> None:
+        if kind == "login":
+            self._set_status("需要登录", "running", "请在专用 Edge 中完成 ERP 登录")
+            QMessageBox.information(self, "请先登录 ERP", message)
+        else:
+            self._set_status("执行失败", "error", message)
+            QMessageBox.critical(self, "执行失败", message)
+
+    @Slot()
+    def _thread_finished(self) -> None:
+        self.running = False
+        self.progress.setVisible(False)
+        self.start_button.setText("开始提取")
+        self._set_controls_enabled(True)
+        self.worker = None
+        self.thread = None
+
+    def closeEvent(self, event) -> None:
+        if self.running:
+            QMessageBox.warning(self, "任务进行中", "当前任务仍在运行，请等待任务完成后再关闭窗口")
+            event.ignore()
+            return
+        self.save_settings()
+        event.accept()
+
+
+def qt_main() -> int:
+    """启动 PySide6 主界面。"""
+    qt_app = QApplication(sys.argv)
+    qt_app.setApplicationName("FACAS")
+    qt_app.setApplicationVersion(APP_VERSION)
+    qt_app.setStyle("Fusion")
+    qt_app.setFont(QFont("Microsoft YaHei UI", 10))
+    window = App()
+    window.show()
+    return qt_app.exec()
 
 
 if __name__ == "__main__":
@@ -1785,4 +2215,4 @@ if __name__ == "__main__":
             args.start, args.end, cli_output, list(MODULES), print,
             pdf_dir=args.pdf_dir, pdf_a5_landscape=args.a5_landscape)
     else:
-        App().mainloop()
+        raise SystemExit(qt_main())
