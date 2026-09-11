@@ -54,7 +54,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 from PySide6.QtCore import QDate, QObject, QThread, Qt, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QCalendarWidget,
@@ -116,6 +116,30 @@ class SaleRow:
     tax: str
     total_weight: str
     remark: str
+
+
+class DateEdit(QDateEdit):
+    """带可见日历图标的日期输入框，避免系统箭头在主题中不可见。"""
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        enabled = self.isEnabled()
+        button_rect = self.rect().adjusted(self.width() - 31, 2, -2, -2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#e5f2fc" if enabled else "#edf2f7"))
+        painter.drawRoundedRect(button_rect, 7, 7)
+
+        icon_color = QColor("#176fa8" if enabled else "#9aabba")
+        painter.setPen(QPen(icon_color, 1.4))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        icon_left = self.width() - 22
+        icon_top = max(9, (self.height() - 13) // 2)
+        painter.drawRoundedRect(icon_left, icon_top, 14, 12, 2, 2)
+        painter.drawLine(icon_left, icon_top + 4, icon_left + 14, icon_top + 4)
+        painter.drawLine(icon_left + 4, icon_top - 2, icon_left + 4, icon_top + 2)
+        painter.drawLine(icon_left + 10, icon_top - 2, icon_left + 10, icon_top + 2)
 
 
 def clean(value: str) -> str:
@@ -240,7 +264,7 @@ def page_print_markup(page: Page, expected_values: list[str] | None = None) -> s
     """Read the bill HTML populated by plugInPrint.html after PrintBill."""
     # plugInPrint.html can be a hidden iframe or a separate context page.
     expected = [clean(value) for value in (expected_values or []) if clean(value) and len(clean(value)) >= 2]
-    deadline = time.monotonic() + 6
+    deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         best_markup = None
         best_score = -1
@@ -331,17 +355,44 @@ def ensure_clodop(page: Page, log) -> bool:
         return False
 
 
+def visible_print_preview_button(page: Page):
+    """查找当前详情页可见的打印预览按钮，避免误取隐藏按钮。"""
+    candidates = [
+        page.get_by_role("button", name=re.compile(r"打印\s*预览")),
+        page.locator("button").filter(has_text=re.compile(r"打印\s*预览")),
+        page.get_by_text("打印预览", exact=True),
+    ]
+    for locator in candidates:
+        try:
+            for index in range(locator.count() - 1, -1, -1):
+                candidate = locator.nth(index)
+                if candidate.is_visible() and candidate.is_enabled():
+                    return candidate
+        except PlaywrightError:
+            continue
+    return None
+
+
 def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] | None = None,
                        a5_landscape: bool = False) -> bool:
     """Capture the ERP PrintBill response and render returned markup."""
+    # 防止同名旧文件在本次打印失败时被误判为新生成文件。
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log(f"清理旧 PDF 失败: {path.name} ({exc})")
     # Do not click "单据打印": that action invokes the native Windows print
     # dialog. Preview is the non-destructive route used for PDF extraction.
-    print_button = page.get_by_role("button", name="打印预览").last
-    if not print_button.count() or not print_button.is_visible():
+    print_button = visible_print_preview_button(page)
+    if print_button is None:
+        log(f"当前详情页未找到“打印预览”按钮: {path.name}")
         return False
-    if not ensure_clodop(page, log):
-        log(f"未检测到可用的 LODOP/C-Lodop（需要 CVERSION 和 SET_LICENSES），跳过 PDF: {path.name}")
-        return False
+    clodop_ready = ensure_clodop(page, log)
+    if not clodop_ready:
+        # PrintBill 响应和渲染的 HTML 有时仍可正常返回，不因 ERP 打印插件
+        # 弹窗直接跳过，后面会捕获并关闭该弹窗后继续生成 PDF。
+        log(f"LODOP/C-Lodop 未完全就绪，继续尝试读取 PrintBill: {path.name}")
     try:
         with page.expect_response(lambda response: "_name=PrintBill" in response.url, timeout=10000) as response_info:
             print_button.click(timeout=5000, no_wait_after=True)
@@ -374,11 +425,12 @@ def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] |
         markup = page_print_markup(page, business_values)
         if not markup:
             response_markup = find_print_markup(payload)
-            # A static template without the current bill number is not enough:
-            # rendering it would create a valid-looking but stale/empty PDF.
-            if response_markup and business_values and any(
-                    value in response_markup for value in business_values):
+            # PrintBill 可能返回固定模板，业务值位于同级 data/vars 中，
+            # 不一定直接出现在模板 HTML 里。响应刚刚由当前单据触发，
+            # 因此只要模板具有可渲染结构即可作为本次打印模板。
+            if response_markup and len(response_markup) >= 200:
                 markup = response_markup
+                log("使用本次 PrintBill 响应中的固定打印模板")
         if not markup:
             debug_path = path.with_suffix(".print-response.txt")
             debug_path.write_text(body, encoding="utf-8")
@@ -393,7 +445,7 @@ def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] |
             save_page_pdf_fallback(preview, path, a5_landscape=a5_landscape)
         finally:
             preview.close()
-        return path.exists() and path.stat().st_size > 0
+        return path.is_file() and path.stat().st_size > 0
     except Exception as exc:
         log(f"捕获 PrintBill 失败: {exc}")
         return False
@@ -1850,8 +1902,8 @@ class App(QMainWindow):
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle(f"报废汽车财务数据自动化处理 {APP_VERSION}")
-        self.resize(1180, 780)
-        self.setMinimumSize(980, 680)
+        self.resize(1180, 720)
+        self.setMinimumSize(980, 640)
         self.setStyleSheet(MODERN_STYLE)
 
         self.app_dir = application_dir()
@@ -1968,12 +2020,12 @@ class App(QMainWindow):
         date_row = QHBoxLayout()
         date_row.setSpacing(8)
         date_row.addWidget(self._field_label("开始日期"))
-        self.start_date = QDateEdit(QDate.currentDate())
+        self.start_date = DateEdit(QDate.currentDate())
         self._configure_date_edit(self.start_date)
         date_row.addWidget(self.start_date)
         date_row.addSpacing(12)
         date_row.addWidget(self._field_label("结束日期"))
-        self.end_date = QDateEdit(QDate.currentDate())
+        self.end_date = DateEdit(QDate.currentDate())
         self._configure_date_edit(self.end_date)
         date_row.addWidget(self.end_date)
         date_row.addStretch(1)
@@ -2058,9 +2110,12 @@ class App(QMainWindow):
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_view.setMaximumBlockCount(2500)
         self.log_view.setFont(QFont("Cascadia Mono", 9))
+        self.log_view.setMinimumHeight(150)
         log_layout.addWidget(self.log_view, 1)
+        log_card.setMinimumHeight(220)
+        log_card.setMaximumHeight(300)
         content.addWidget(left)
-        content.addWidget(log_card, 1)
+        content.addWidget(log_card, 0, Qt.AlignmentFlag.AlignTop)
         outer.addLayout(content, 1)
 
         action_bar = QFrame()
