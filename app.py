@@ -1783,6 +1783,27 @@ QPushButton#primaryButton:disabled {
     background: #86b8d7;
     color: #eaf7ff;
 }
+QPushButton#secondaryButton {
+    background: #e5f2fc;
+    color: #1261a0;
+    border: 1px solid #9fc8e5;
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-size: 11px;
+    font-weight: 700;
+}
+QPushButton#secondaryButton:hover {
+    background: #d7edfb;
+    border-color: #62a9d2;
+}
+QPushButton#secondaryButton:pressed {
+    background: #c6e5f7;
+}
+QPushButton#secondaryButton:disabled {
+    background: #eaf1f8;
+    color: #91a5b8;
+    border-color: #d9e5f0;
+}
 QPushButton#quietButton {
     background: #edf5fc;
     border: 1px solid #d0e2f3;
@@ -2035,6 +2056,7 @@ class App(QMainWindow):
         scope_card, scope_layout = self._card("数据范围", "可同时选择销售分类和凭证类型")
         scope_actions = QHBoxLayout()
         scope_actions.addStretch(1)
+        scope_actions.setSpacing(10)
         self.select_all_button = QPushButton("全选")
         self.select_all_button.setObjectName("quietButton")
         self.select_all_button.clicked.connect(lambda: self.set_categories(True))
@@ -2045,8 +2067,8 @@ class App(QMainWindow):
         scope_actions.addWidget(self.clear_all_button)
         scope_layout.addLayout(scope_actions)
         groups = QGridLayout()
-        groups.setHorizontalSpacing(10)
-        groups.setVerticalSpacing(10)
+        groups.setHorizontalSpacing(14)
+        groups.setVerticalSpacing(14)
         self.category_checks: dict[str, QCheckBox] = {}
         self.form_checks: dict[str, QCheckBox] = {}
         sales_group = self._selection_group("销售管理", MODULES, self.category_checks, True)
@@ -2110,11 +2132,13 @@ class App(QMainWindow):
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_view.setMaximumBlockCount(2500)
         self.log_view.setFont(QFont("Cascadia Mono", 9))
-        # 默认只展示少量关键日志，完整内容仍可滚动查看并保存在日志文件中。
-        self.log_view.setMinimumHeight(86)
+        # 日志保持原来的纵向可读高度，右侧卡片限制宽度避免挤占主操作区域。
+        self.log_view.setMinimumHeight(150)
         log_layout.addWidget(self.log_view, 1)
-        log_card.setMinimumHeight(150)
-        log_card.setMaximumHeight(180)
+        log_card.setMinimumWidth(330)
+        log_card.setMaximumWidth(390)
+        log_card.setMinimumHeight(220)
+        log_card.setMaximumHeight(300)
         content.addWidget(left)
         content.addWidget(log_card, 0, Qt.AlignmentFlag.AlignTop)
         outer.addLayout(content, 1)
@@ -2132,6 +2156,11 @@ class App(QMainWindow):
         self.progress.setFixedWidth(150)
         self.progress.setVisible(False)
         action_layout.addWidget(self.progress)
+        self.login_button = QPushButton("登录 ERP")
+        self.login_button.setObjectName("secondaryButton")
+        self.login_button.setMinimumWidth(120)
+        self.login_button.clicked.connect(self.login_erp)
+        action_layout.addWidget(self.login_button)
         self.start_button = QPushButton("开始提取")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setMinimumWidth(140)
@@ -2153,6 +2182,7 @@ class App(QMainWindow):
             self.pdf_a5_landscape,
             self.select_all_button,
             self.clear_all_button,
+            self.login_button,
             self.start_button,
         ]
 
@@ -2162,7 +2192,7 @@ class App(QMainWindow):
         group.setObjectName("subCard")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(2)
+        layout.setSpacing(7)
         label = QLabel(title)
         label.setObjectName("subTitle")
         layout.addWidget(label)
@@ -2189,6 +2219,25 @@ class App(QMainWindow):
         self.pdf_dir_edit.setEnabled(pdf_enabled and not self.running)
         self.pdf_browse.setEnabled(pdf_enabled and not self.running)
         self.pdf_a5_landscape.setEnabled(pdf_enabled and not self.running)
+
+    def login_erp(self) -> None:
+        """启动专用 Edge，让用户先完成 ERP 登录。"""
+        if self.running:
+            return
+        try:
+            if debug_port_available():
+                message = "专用 Edge 已经打开，请在该窗口完成 ERP 登录。登录完成后点击“开始提取”。"
+                self.log("专用 Edge 已在运行，请完成 ERP 登录")
+            else:
+                start_debug_edge()
+                message = "专用 Edge 已启动，请在新窗口完成 ERP 登录。登录完成后点击“开始提取”。"
+                self.log("已启动专用 Edge，请在新窗口完成 ERP 登录")
+            self._set_status("待登录", "running", "请在专用 Edge 中完成 ERP 登录")
+            QMessageBox.information(self, "登录 ERP", message)
+        except Exception as exc:
+            self.log(f"启动专用 Edge 失败: {exc}")
+            self._set_status("启动失败", "error", "请检查 Microsoft Edge 是否已安装")
+            QMessageBox.critical(self, "无法启动 Edge", str(exc))
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for control in self.task_controls:
@@ -2316,6 +2365,12 @@ class App(QMainWindow):
             return
         if save_pdfs and not pdf_dir_text:
             QMessageBox.warning(self, "输出设置不完整", "请先选择 PDF 输出目录")
+            return
+        if not debug_port_available():
+            message = "请先点击“登录 ERP”，在专用 Edge 中完成登录后再开始提取。"
+            self.log(message)
+            self._set_status("未登录", "error", message)
+            QMessageBox.information(self, "请先登录 ERP", message)
             return
 
         self.save_settings()
