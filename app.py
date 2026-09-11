@@ -203,11 +203,15 @@ def start_debug_edge() -> None:
 
 
 def debug_port_available() -> bool:
+    """快速检测专用 Edge 端口，避免在界面线程中长时间阻塞。"""
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        with socket.create_connection(("127.0.0.1", DEBUG_PORT), timeout=0.5):
-            return True
+        client.settimeout(0.08)
+        return client.connect_ex(("127.0.0.1", DEBUG_PORT)) == 0
     except OSError:
         return False
+    finally:
+        client.close()
 
 
 def live_erp_page(browser):
@@ -1590,6 +1594,30 @@ class ExtractionWorker(QObject):
             self.failed.emit("error", error_text)
 
 
+class ErpStateProbe(QObject):
+    """在后台线程检测专用 Edge，避免端口探测阻塞主界面。"""
+
+    state_ready = Signal(bool)
+
+    def __init__(self):
+        super().__init__()
+        self._checking = False
+
+    @Slot()
+    def check(self) -> None:
+        # 定时信号可能在上一次探测尚未结束时再次到达，避免并发探测。
+        if self._checking:
+            return
+        self._checking = True
+        try:
+            current = debug_port_available()
+        except OSError:
+            current = False
+        finally:
+            self._checking = False
+        self.state_ready.emit(current)
+
+
 MODERN_STYLE = """
 QMainWindow, QWidget#root {
     background: #edf4fc;
@@ -1654,6 +1682,41 @@ QFrame#card {
     background: #ffffff;
     border: 1px solid #cfe0f2;
     border-radius: 14px;
+}
+QFrame#actionBar {
+    background: #f7fbff;
+    border: 1px solid #c5dced;
+    border-radius: 14px;
+}
+QLabel#taskStatus {
+    background: #e3f2ff;
+    color: #1261a0;
+    border: 1px solid #b7d8ef;
+    border-radius: 9px;
+    padding: 7px 12px;
+    min-height: 18px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QLabel#taskStatus[state="ready"] {
+    background: #e3f2ff;
+    color: #1261a0;
+    border-color: #b7d8ef;
+}
+QLabel#taskStatus[state="running"] {
+    background: #e4f7ff;
+    color: #087eaa;
+    border-color: #9ed8ec;
+}
+QLabel#taskStatus[state="success"] {
+    background: #e1f7ef;
+    color: #18794e;
+    border-color: #a9dfc8;
+}
+QLabel#taskStatus[state="error"] {
+    background: #fde8ef;
+    color: #b4235a;
+    border-color: #efb8ca;
 }
 QFrame#subCard {
     background: #f4f8fd;
@@ -1920,13 +1983,14 @@ QCalendarWidget QMenu {
 class App(QMainWindow):
     """PySide6 主界面，负责交互、配置和后台任务调度。"""
 
+    erp_probe_requested = Signal()
+
     def __init__(self):
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle(f"报废汽车财务数据自动化处理 {APP_VERSION}")
-        # 默认尺寸给左侧完整操作区和右侧日志留出稳定空间。
-        self.resize(1250, 950)
-        self.setMinimumSize(1000, 800)
+        # 固定尺寸，避免复选项、输出路径和日志区在缩放时重新换行。
+        self.setFixedSize(1250, 950)
         self.setStyleSheet(MODERN_STYLE)
 
         self.app_dir = application_dir()
@@ -1944,6 +2008,17 @@ class App(QMainWindow):
         self._build_ui()
         self.load_settings()
         self._update_output_controls()
+        self._update_erp_controls()
+
+        # 端口探测放到独立线程，避免 ERP 未启动时连接超时卡住 Qt 主线程。
+        self.erp_probe_thread = QThread(self)
+        self.erp_probe_worker = ErpStateProbe()
+        self.erp_probe_worker.moveToThread(self.erp_probe_thread)
+        self.erp_probe_requested.connect(self.erp_probe_worker.check, Qt.ConnectionType.QueuedConnection)
+        self.erp_probe_worker.state_ready.connect(self._apply_erp_state, Qt.ConnectionType.QueuedConnection)
+        self.erp_probe_thread.finished.connect(self.erp_probe_worker.deleteLater)
+        self.erp_probe_thread.start()
+
         self._refresh_erp_state()
         self.erp_state_timer = QTimer(self)
         self.erp_state_timer.setInterval(1000)
@@ -2167,11 +2242,14 @@ class App(QMainWindow):
         outer.addLayout(content, 1)
 
         action_bar = QFrame()
-        action_bar.setObjectName("card")
+        action_bar.setObjectName("actionBar")
         action_layout = QHBoxLayout(action_bar)
         action_layout.setContentsMargins(16, 10, 16, 10)
         self.task_status = QLabel("请先登录 ERP，再选择日期和数据范围开始提取")
-        self.task_status.setObjectName("cardHint")
+        self.task_status.setObjectName("taskStatus")
+        self.task_status.setProperty("state", "ready")
+        self.task_status.setMinimumWidth(360)
+        self.task_status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         action_layout.addWidget(self.task_status)
         action_layout.addStretch(1)
         self.progress = QProgressBar()
@@ -2262,8 +2340,12 @@ class App(QMainWindow):
         self.start_button.setEnabled(self.erp_open)
 
     def _refresh_erp_state(self) -> None:
-        """定期检测专用 Edge，避免重复启动或在窗口关闭后仍可提取。"""
-        current = debug_port_available()
+        """请求后台检测专用 Edge，不在界面线程中直接连接端口。"""
+        if hasattr(self, "erp_probe_worker"):
+            self.erp_probe_requested.emit()
+
+    def _apply_erp_state(self, current: bool) -> None:
+        """接收后台探测结果并更新界面控件状态。"""
         if current != self.erp_open:
             self.erp_open = current
             if current:
@@ -2279,7 +2361,7 @@ class App(QMainWindow):
         """启动专用 Edge，让用户先完成 ERP 登录。"""
         if self.running or self.erp_launching:
             return
-        if self.erp_open or debug_port_available():
+        if self.erp_open:
             self.erp_open = True
             self._update_erp_controls()
             self.log("专用 Edge 已在运行，请完成 ERP 登录")
@@ -2405,6 +2487,9 @@ class App(QMainWindow):
         self.status_chip.setProperty("state", state)
         self.status_chip.style().unpolish(self.status_chip)
         self.status_chip.style().polish(self.status_chip)
+        self.task_status.setProperty("state", state)
+        self.task_status.style().unpolish(self.task_status)
+        self.task_status.style().polish(self.task_status)
         if detail:
             self.task_status.setText(detail)
 
@@ -2431,7 +2516,7 @@ class App(QMainWindow):
         if save_pdfs and not pdf_dir_text:
             QMessageBox.warning(self, "输出设置不完整", "请先选择 PDF 输出目录")
             return
-        if not self.erp_open or not debug_port_available():
+        if not self.erp_open:
             self.erp_open = False
             self.erp_launching = False
             self._update_erp_controls()
@@ -2508,7 +2593,6 @@ class App(QMainWindow):
     @Slot(str, str)
     def _task_failed(self, kind: str, message: str) -> None:
         if kind == "login":
-            self.erp_open = debug_port_available()
             self._set_status("需要登录", "running", "请在专用 Edge 中完成 ERP 登录")
             QMessageBox.information(self, "请先登录 ERP", message)
         else:
@@ -2518,7 +2602,6 @@ class App(QMainWindow):
     @Slot()
     def _thread_finished(self) -> None:
         self.running = False
-        self.erp_open = debug_port_available()
         self.erp_launching = False
         self.progress.setVisible(False)
         self.start_button.setText("开始提取")
@@ -2532,6 +2615,11 @@ class App(QMainWindow):
             QMessageBox.warning(self, "任务进行中", "当前任务仍在运行，请等待任务完成后再关闭窗口")
             event.ignore()
             return
+        if hasattr(self, "erp_state_timer"):
+            self.erp_state_timer.stop()
+        if hasattr(self, "erp_probe_thread") and self.erp_probe_thread.isRunning():
+            self.erp_probe_thread.quit()
+            self.erp_probe_thread.wait(1000)
         self.save_settings()
         event.accept()
 
