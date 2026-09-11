@@ -38,6 +38,7 @@ FORM_MODULES = {
 
 ERP_URL = "https://erp.bfcgj.com/module.jsp?module=desk_main"
 DEBUG_PORT = 9222
+APP_VERSION = "v1.0.0"
 
 
 def application_dir() -> Path:
@@ -142,13 +143,16 @@ def live_erp_page(browser):
     return pages[-1]
 
 
-def save_page_pdf_fallback(page: Page, path: Path) -> None:
+def save_page_pdf_fallback(page: Page, path: Path, a5_landscape: bool = False) -> None:
+    """使用 Chromium CDP 保存 PDF，支持默认 A4 竖版和 A5 横版。"""
     session = page.context.new_cdp_session(page)
+    paper_width, paper_height = (8.27, 5.83) if a5_landscape else (8.27, 11.69)
     result = session.send("Page.printToPDF", {
         "printBackground": True,
-        "preferCSSPageSize": True,
-        "paperWidth": 8.27,
-        "paperHeight": 11.69,
+        # A5 横版时关闭 CSS 纸张优先，确保用户选择的纸张尺寸真正生效。
+        "preferCSSPageSize": not a5_landscape,
+        "paperWidth": paper_width,
+        "paperHeight": paper_height,
         "marginTop": 0.2,
         "marginBottom": 0.2,
         "marginLeft": 0.2,
@@ -275,7 +279,8 @@ def ensure_clodop(page: Page, log) -> bool:
         return False
 
 
-def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] | None = None) -> bool:
+def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] | None = None,
+                       a5_landscape: bool = False) -> bool:
     """Capture the ERP PrintBill response and render returned markup."""
     # Do not click "单据打印": that action invokes the native Windows print
     # dialog. Preview is the non-destructive route used for PDF extraction.
@@ -333,7 +338,7 @@ def save_printbill_pdf(page: Page, path: Path, log, expected_values: list[str] |
         preview = page.context.new_page()
         try:
             preview.set_content(markup, wait_until="networkidle")
-            save_page_pdf_fallback(preview, path)
+            save_page_pdf_fallback(preview, path, a5_landscape=a5_landscape)
         finally:
             preview.close()
         return path.exists() and path.stat().st_size > 0
@@ -782,7 +787,8 @@ def voucher_value(row: dict, header: str) -> str:
 
 
 def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
-                  pdf_dir: Path | None = None, generated_pdfs: set[Path] | None = None) -> list[SaleRow]:
+                  pdf_dir: Path | None = None, generated_pdfs: set[Path] | None = None,
+                  pdf_a5_landscape: bool = False) -> list[SaleRow]:
     if page.is_closed():
         raise RuntimeError("ERP 页面已关闭，请重新登录专用 Edge")
     log(f"{sale_type}: 正在打开销售列表")
@@ -958,7 +964,9 @@ def scrape_module(page: Page, sale_type: str, start: str, end: str, log,
                     if pdf_dir is not None:
                         pdf_path = pdf_dir / f"{safe_filename(sale_type)}-{safe_filename(sale_date)}-{safe_filename(sale_no)}.pdf"
                         expected_print_values = [sale_no, sale_no.lstrip("$")[-8:], sale_date]
-                        if save_printbill_pdf(page, pdf_path, log, expected_print_values):
+                        if save_printbill_pdf(
+                                page, pdf_path, log, expected_print_values,
+                                a5_landscape=pdf_a5_landscape):
                             if generated_pdfs is not None:
                                 generated_pdfs.add(pdf_path.resolve())
                             log(f"已保存 PDF: {pdf_path.name}")
@@ -1186,7 +1194,8 @@ def click_voucher_page_and_wait(page: Page, button, form_name: str, timeout: flo
 
 
 def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
-                        pdf_dir: Path | None = None, generated_pdfs: set[Path] | None = None) -> tuple[list[str], list[list[str]]]:
+                        pdf_dir: Path | None = None, generated_pdfs: set[Path] | None = None,
+                        pdf_a5_landscape: bool = False) -> tuple[list[str], list[list[str]]]:
     """Read a voucher list using the columns rendered by the ERP itself."""
     # Voucher menus are nested under 财务管理 > 凭证处理 > 凭证探测器.
     category = "采购" if form_name == "采购单" else "车辆"
@@ -1310,7 +1319,9 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
                     bill_date = voucher_value(row, "单据日期") or start
                     pdf_path = pdf_dir / f"{safe_filename(form_name)}-{safe_filename(bill_date)}-{safe_filename(bill_no)}.pdf"
                     expected_print_values = [bill_no, short_bill_no, bill_date]
-                    if save_printbill_pdf(page, pdf_path, log, expected_print_values):
+                    if save_printbill_pdf(
+                            page, pdf_path, log, expected_print_values,
+                            a5_landscape=pdf_a5_landscape):
                         if generated_pdfs is not None:
                             generated_pdfs.add(pdf_path.resolve())
                         log(f"已保存 PDF: {pdf_path.name}")
@@ -1343,7 +1354,9 @@ def scrape_default_form(page: Page, form_name: str, start: str, end: str, log,
     return headers, rows_out
 
 
-def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: Path | None = None, selected_forms: list[str] | None = None, save_excel: bool = True) -> tuple[int, int, bool]:
+def run(start: str, end: str, output: Path, selected: list[str], log,
+        pdf_dir: Path | None = None, selected_forms: list[str] | None = None,
+        save_excel: bool = True, pdf_a5_landscape: bool = False) -> tuple[int, int, bool]:
     if save_excel:
         output.parent.mkdir(parents=True, exist_ok=True)
     if pdf_dir is not None:
@@ -1366,7 +1379,9 @@ def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: P
         for sale_type in selected:
             page = live_erp_page(browser)
             log(f"正在读取: {sale_type}")
-            module_rows = scrape_module(page, sale_type, start, end, log, pdf_dir, generated_pdfs)
+            module_rows = scrape_module(
+                page, sale_type, start, end, log, pdf_dir, generated_pdfs,
+                pdf_a5_landscape)
             log(f"{sale_type}: 查询到 {len(module_rows)} 张销售单")
             rows.extend(module_rows)
         if not rows and not selected_forms:
@@ -1377,7 +1392,9 @@ def run(start: str, end: str, output: Path, selected: list[str], log, pdf_dir: P
                 page = live_erp_page(browser)
                 log(f"正在读取: {form_name}")
                 try:
-                    form_sheets[form_name] = scrape_default_form(page, form_name, start, end, log, pdf_dir, generated_pdfs)
+                    form_sheets[form_name] = scrape_default_form(
+                        page, form_name, start, end, log, pdf_dir, generated_pdfs,
+                        pdf_a5_landscape)
                     log(f"{form_name}: 读取 {len(form_sheets[form_name][1])} 条")
                 except Exception as exc:
                     form_errors.append(f"{form_name}: {exc}")
@@ -1405,7 +1422,7 @@ class App(tk.Tk):
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.running = False
         self.start_button = None
-        self.title("报废汽车财务数据自动化处理")
+        self.title(f"报废汽车财务数据自动化处理 {APP_VERSION}")
         self.geometry("860x560")
         self.minsize(760, 500)
         today = date.today().isoformat()
@@ -1421,6 +1438,7 @@ class App(tk.Tk):
         self.output = tk.StringVar(value=str(self.default_output))
         self.pdf_dir = tk.StringVar(value=str(self.default_pdf_dir))
         self.save_pdfs = tk.BooleanVar(value=True)
+        self.pdf_a5_landscape = tk.BooleanVar(value=False)
         self.save_excel = tk.BooleanVar(value=True)
         self.vars = {name: tk.BooleanVar(value=True) for name in MODULES}
         self.form_vars = {name: tk.BooleanVar(value=False) for name in FORM_MODULES}
@@ -1470,19 +1488,28 @@ class App(tk.Tk):
 
         output = ttk.LabelFrame(frame, text="输出设置", padding=(14, 10))
         output.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        output.columnconfigure(2, weight=1)
+        output.columnconfigure(3, weight=1)
         ttk.Checkbutton(output, text="Excel", variable=self.save_excel).grid(
             row=0, column=0, sticky="w", padx=(0, 12), pady=5
         )
         ttk.Label(output, text="文件").grid(row=0, column=1, sticky="w", padx=(0, 10), pady=5)
-        ttk.Entry(output, textvariable=self.output).grid(row=0, column=2, sticky="ew", pady=5)
-        ttk.Button(output, text="选择文件", command=self.choose).grid(row=0, column=3, padx=(10, 0), pady=5)
+        ttk.Entry(output, textvariable=self.output).grid(
+            row=0, column=2, columnspan=2, sticky="ew", pady=5
+        )
+        ttk.Button(output, text="选择文件", command=self.choose).grid(
+            row=0, column=4, padx=(10, 0), pady=5
+        )
         ttk.Checkbutton(output, text="PDF", variable=self.save_pdfs).grid(
             row=1, column=0, sticky="w", padx=(0, 12), pady=5
         )
-        ttk.Label(output, text="目录").grid(row=1, column=1, sticky="w", padx=(0, 10), pady=5)
-        ttk.Entry(output, textvariable=self.pdf_dir).grid(row=1, column=2, sticky="ew", pady=5)
-        ttk.Button(output, text="选择目录", command=self.choose_pdf_dir).grid(row=1, column=3, padx=(10, 0), pady=5)
+        ttk.Checkbutton(output, text="A5横版", variable=self.pdf_a5_landscape).grid(
+            row=1, column=1, sticky="w", padx=(0, 10), pady=5
+        )
+        ttk.Label(output, text="目录").grid(row=1, column=2, sticky="w", padx=(0, 10), pady=5)
+        ttk.Entry(output, textvariable=self.pdf_dir).grid(row=1, column=3, sticky="ew", pady=5)
+        ttk.Button(output, text="选择目录", command=self.choose_pdf_dir).grid(
+            row=1, column=4, padx=(10, 0), pady=5
+        )
 
         log_frame = ttk.LabelFrame(frame, text="运行日志", padding=(8, 8))
         log_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
@@ -1626,6 +1653,8 @@ class App(tk.Tk):
             self.pdf_dir.set(str(self.default_pdf_dir) if stored_path == old_default_pdf_dir else stored_pdf_dir)
         if "save_pdfs" in settings:
             self.save_pdfs.set(bool(settings["save_pdfs"]))
+        if "pdf_a5_landscape" in settings:
+            self.pdf_a5_landscape.set(bool(settings["pdf_a5_landscape"]))
         if "save_excel" in settings:
             self.save_excel.set(bool(settings["save_excel"]))
         for name, variable in self.vars.items():
@@ -1640,6 +1669,7 @@ class App(tk.Tk):
             "start": self.start.get(), "end": self.end.get(),
             "output": self.output.get(), "pdf_dir": self.pdf_dir.get(),
             "save_pdfs": self.save_pdfs.get(),
+            "pdf_a5_landscape": self.pdf_a5_landscape.get(),
             "save_excel": self.save_excel.get(),
             "categories": {name: variable.get() for name, variable in self.vars.items()},
             "forms": {name: variable.get() for name, variable in self.form_vars.items()},
@@ -1690,20 +1720,30 @@ class App(tk.Tk):
         end = self.end.get()
         output = Path(self.output.get())
         pdf_dir = Path(self.pdf_dir.get()) if self.save_pdfs.get() else None
+        pdf_a5_landscape = self.pdf_a5_landscape.get()
         save_excel = self.save_excel.get()
         self.log(f"任务已启动，日期范围: {self.start.get()} 至 {self.end.get()}")
         self.log(f"销售分类: {', '.join(selected) if selected else '未选择'}")
         self.log(f"凭证类型: {', '.join(selected_forms) if selected_forms else '未选择'}")
-        self.log(f"输出设置: Excel={'开启' if save_excel else '关闭'}；PDF={'开启' if pdf_dir is not None else '关闭'}")
+        pdf_status = "关闭"
+        if pdf_dir is not None:
+            pdf_status = f"开启（{'A5横版' if pdf_a5_landscape else 'A4竖版'}）"
+        self.log(f"输出设置: Excel={'开启' if save_excel else '关闭'}；PDF={pdf_status}")
         if save_excel:
             self.log(f"Excel 路径: {output}")
         if pdf_dir is not None:
             self.log(f"PDF 目录: {pdf_dir}")
-        threading.Thread(target=self.worker, args=(selected, selected_forms, start, end, output, pdf_dir, save_excel), daemon=True).start()
+        threading.Thread(
+            target=self.worker,
+            args=(selected, selected_forms, start, end, output, pdf_dir, save_excel, pdf_a5_landscape),
+            daemon=True,
+        ).start()
 
-    def worker(self, selected, selected_forms, start, end, output, pdf_dir, save_excel):
+    def worker(self, selected, selected_forms, start, end, output, pdf_dir, save_excel, pdf_a5_landscape):
         try:
-            row_count, pdf_count, excel_generated = run(start, end, output, selected, self.log, pdf_dir, selected_forms, save_excel)
+            row_count, pdf_count, excel_generated = run(
+                start, end, output, selected, self.log, pdf_dir, selected_forms,
+                save_excel, pdf_a5_landscape)
             outputs = ["日期范围内未查询到可导出数据" if row_count == 0 else f"共读取 {row_count} 条数据"]
             outputs.append("已生成 1 个 Excel" if excel_generated else "未生成 Excel")
             outputs.append(f"已生成 {pdf_count} 个 PDF" if pdf_dir is not None else "未生成 PDF")
@@ -1737,9 +1777,12 @@ class App(tk.Tk):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--start"); parser.add_argument("--end"); parser.add_argument("--output", type=Path); parser.add_argument("--pdf-dir", type=Path)
+    parser.add_argument("--a5-landscape", action="store_true", help="使用 A5 横版生成 PDF")
     args = parser.parse_args()
     if args.start and args.end:
         cli_output = args.output or (Path.cwd() / "output" / "Excel" / "销售数据.xlsx")
-        run(args.start, args.end, cli_output, list(MODULES), print, args.pdf_dir)
+        run(
+            args.start, args.end, cli_output, list(MODULES), print,
+            pdf_dir=args.pdf_dir, pdf_a5_landscape=args.a5_landscape)
     else:
         App().mainloop()
