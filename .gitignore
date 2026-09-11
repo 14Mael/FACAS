@@ -25,6 +25,9 @@ build-modern/
 dist-modern/
 build-folder/
 dist-folder/
+build-slim*/
+dist-slim*/
+dist-optimized/
 mei-capture/
 *.spec
 !FACAS.spec
