@@ -1925,8 +1925,8 @@ class App(QMainWindow):
         self.setObjectName("mainWindow")
         self.setWindowTitle(f"报废汽车财务数据自动化处理 {APP_VERSION}")
         # 默认尺寸给左侧完整操作区和右侧日志留出稳定空间。
-        self.resize(1500, 1000)
-        self.setMinimumSize(1000, 700)
+        self.resize(1250, 950)
+        self.setMinimumSize(1000, 800)
         self.setStyleSheet(MODERN_STYLE)
 
         self.app_dir = application_dir()
