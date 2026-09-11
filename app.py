@@ -53,7 +53,7 @@ prepare_frozen_dll_search_path()
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
-from PySide6.QtCore import QDate, QObject, QThread, Qt, Signal, Slot
+from PySide6.QtCore import QDate, QObject, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -1923,8 +1924,9 @@ class App(QMainWindow):
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle(f"报废汽车财务数据自动化处理 {APP_VERSION}")
-        self.resize(1180, 720)
-        self.setMinimumSize(980, 640)
+        # 默认尺寸给左侧完整操作区和右侧日志留出稳定空间。
+        self.resize(1200, 900)
+        self.setMinimumSize(1000, 700)
         self.setStyleSheet(MODERN_STYLE)
 
         self.app_dir = application_dir()
@@ -1934,12 +1936,19 @@ class App(QMainWindow):
         self.settings_path = self.app_dir / "facas-settings.json"
         self.log_dir = self.app_dir / "log"
         self.running = False
+        self.erp_open = False
+        self.erp_launching = False
         self.thread: QThread | None = None
         self.worker: ExtractionWorker | None = None
 
         self._build_ui()
         self.load_settings()
         self._update_output_controls()
+        self._refresh_erp_state()
+        self.erp_state_timer = QTimer(self)
+        self.erp_state_timer.setInterval(1000)
+        self.erp_state_timer.timeout.connect(self._refresh_erp_state)
+        self.erp_state_timer.start()
         self._center_window()
         self.log(f"程序已启动，日志文件: {self.log_dir / f'{date.today().isoformat()}.log'}")
 
@@ -2034,8 +2043,9 @@ class App(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
-        left.setMinimumWidth(470)
-        left.setMaximumWidth(560)
+        # 左侧使用固定宽度，保证复选项和输出路径两列在不同窗口尺寸下不跳动。
+        left.setFixedWidth(560)
+        left.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         query_card, query_layout = self._card("查询范围", "销售和凭证均按此日期执行")
         date_row = QHBoxLayout()
@@ -2067,48 +2077,64 @@ class App(QMainWindow):
         scope_actions.addWidget(self.clear_all_button)
         scope_layout.addLayout(scope_actions)
         groups = QGridLayout()
-        groups.setHorizontalSpacing(14)
-        groups.setVerticalSpacing(14)
+        groups.setContentsMargins(0, 2, 0, 0)
+        groups.setHorizontalSpacing(12)
+        groups.setVerticalSpacing(10)
         self.category_checks: dict[str, QCheckBox] = {}
         self.form_checks: dict[str, QCheckBox] = {}
         sales_group = self._selection_group("销售管理", MODULES, self.category_checks, True)
         voucher_group = self._selection_group("凭证探测器", FORM_MODULES, self.form_checks, False)
         groups.addWidget(sales_group, 0, 0)
         groups.addWidget(voucher_group, 0, 1)
+        groups.setColumnMinimumWidth(0, 248)
+        groups.setColumnMinimumWidth(1, 248)
         groups.setColumnStretch(0, 1)
         groups.setColumnStretch(1, 1)
         scope_layout.addLayout(groups)
         left_layout.addWidget(scope_card)
 
         output_card, output_layout = self._card("输出设置", "文件只会在对应开关开启时生成")
+        output_layout.setSpacing(8)
         excel_row = QHBoxLayout()
+        excel_row.setSpacing(8)
         self.save_excel = QCheckBox("生成 Excel")
         self.save_excel.setChecked(True)
+        self.save_excel.setFixedWidth(92)
+        self.save_excel.setMinimumHeight(38)
         self.save_excel.toggled.connect(self._update_output_controls)
         excel_row.addWidget(self.save_excel)
         self.output_edit = QLineEdit(str(self.default_output))
         self.output_edit.setPlaceholderText("选择 Excel 输出文件")
+        self.output_edit.setMinimumHeight(38)
         excel_row.addWidget(self.output_edit, 1)
         self.output_browse = QPushButton("选择文件")
+        self.output_browse.setFixedWidth(82)
+        self.output_browse.setMinimumHeight(38)
         self.output_browse.clicked.connect(self.choose_output)
         excel_row.addWidget(self.output_browse)
         output_layout.addLayout(excel_row)
 
         pdf_row = QHBoxLayout()
+        pdf_row.setSpacing(8)
         self.save_pdfs = QCheckBox("生成 PDF")
         self.save_pdfs.setChecked(True)
+        self.save_pdfs.setFixedWidth(92)
+        self.save_pdfs.setMinimumHeight(38)
         self.save_pdfs.toggled.connect(self._update_output_controls)
         pdf_row.addWidget(self.save_pdfs)
         self.pdf_dir_edit = QLineEdit(str(self.default_pdf_dir))
         self.pdf_dir_edit.setPlaceholderText("选择 PDF 输出目录")
+        self.pdf_dir_edit.setMinimumHeight(38)
         pdf_row.addWidget(self.pdf_dir_edit, 1)
         self.pdf_browse = QPushButton("选择目录")
+        self.pdf_browse.setFixedWidth(82)
+        self.pdf_browse.setMinimumHeight(38)
         self.pdf_browse.clicked.connect(self.choose_pdf_dir)
         pdf_row.addWidget(self.pdf_browse)
         output_layout.addLayout(pdf_row)
 
         pdf_options = QHBoxLayout()
-        pdf_options.setContentsMargins(92, 0, 0, 0)
+        pdf_options.setContentsMargins(100, 0, 0, 0)
         self.pdf_a5_landscape = QCheckBox("A5 横版")
         self.pdf_a5_landscape.setChecked(False)
         pdf_options.addWidget(self.pdf_a5_landscape)
@@ -2132,22 +2158,19 @@ class App(QMainWindow):
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_view.setMaximumBlockCount(2500)
         self.log_view.setFont(QFont("Cascadia Mono", 9))
-        # 日志保持原来的纵向可读高度，右侧卡片限制宽度避免挤占主操作区域。
         self.log_view.setMinimumHeight(150)
         log_layout.addWidget(self.log_view, 1)
-        log_card.setMinimumWidth(330)
-        log_card.setMaximumWidth(390)
-        log_card.setMinimumHeight(220)
-        log_card.setMaximumHeight(300)
-        content.addWidget(left)
-        content.addWidget(log_card, 0, Qt.AlignmentFlag.AlignTop)
+        # 日志区使用左侧布局之外的全部剩余宽度，并与左侧内容区等高。
+        log_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        content.addWidget(left, 0)
+        content.addWidget(log_card, 1)
         outer.addLayout(content, 1)
 
         action_bar = QFrame()
         action_bar.setObjectName("card")
         action_layout = QHBoxLayout(action_bar)
         action_layout.setContentsMargins(16, 10, 16, 10)
-        self.task_status = QLabel("准备就绪，选择日期和数据范围后开始")
+        self.task_status = QLabel("请先登录 ERP，再选择日期和数据范围开始提取")
         self.task_status.setObjectName("cardHint")
         action_layout.addWidget(self.task_status)
         action_layout.addStretch(1)
@@ -2190,15 +2213,22 @@ class App(QMainWindow):
     def _selection_group(title: str, values: dict[str, str], storage: dict[str, QCheckBox], default: bool) -> QFrame:
         group = QFrame()
         group.setObjectName("subCard")
+        group.setMinimumWidth(248)
+        group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(group)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(7)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(6)
         label = QLabel(title)
         label.setObjectName("subTitle")
+        label.setMinimumHeight(22)
         layout.addWidget(label)
         for name in values:
             check = QCheckBox(name)
             check.setChecked(default)
+            check.setMinimumWidth(132)
+            check.setMinimumHeight(28)
+            check.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            check.setToolTip(name)
             storage[name] = check
             layout.addWidget(check)
         layout.addStretch(1)
@@ -2220,29 +2250,64 @@ class App(QMainWindow):
         self.pdf_browse.setEnabled(pdf_enabled and not self.running)
         self.pdf_a5_landscape.setEnabled(pdf_enabled and not self.running)
 
+    def _update_erp_controls(self) -> None:
+        """根据专用 Edge 状态统一锁定登录和提取按钮。"""
+        if not hasattr(self, "login_button"):
+            return
+        if self.running:
+            self.login_button.setEnabled(False)
+            self.start_button.setEnabled(False)
+            return
+        self.login_button.setEnabled(not self.erp_open and not self.erp_launching)
+        self.start_button.setEnabled(self.erp_open)
+
+    def _refresh_erp_state(self) -> None:
+        """定期检测专用 Edge，避免重复启动或在窗口关闭后仍可提取。"""
+        current = debug_port_available()
+        if current != self.erp_open:
+            self.erp_open = current
+            if current:
+                self.erp_launching = False
+                if not self.running:
+                    self._set_status("ERP 已连接", "ready", "可以开始提取")
+            elif not self.running:
+                self.erp_launching = False
+                self._set_status("待登录", "ready", "请先点击“登录 ERP”")
+        self._update_erp_controls()
+
     def login_erp(self) -> None:
         """启动专用 Edge，让用户先完成 ERP 登录。"""
-        if self.running:
+        if self.running or self.erp_launching:
+            return
+        if self.erp_open or debug_port_available():
+            self.erp_open = True
+            self._update_erp_controls()
+            self.log("专用 Edge 已在运行，请完成 ERP 登录")
+            self._set_status("ERP 已连接", "ready", "可以开始提取")
             return
         try:
-            if debug_port_available():
-                message = "专用 Edge 已经打开，请在该窗口完成 ERP 登录。登录完成后点击“开始提取”。"
-                self.log("专用 Edge 已在运行，请完成 ERP 登录")
-            else:
-                start_debug_edge()
-                message = "专用 Edge 已启动，请在新窗口完成 ERP 登录。登录完成后点击“开始提取”。"
-                self.log("已启动专用 Edge，请在新窗口完成 ERP 登录")
+            self.erp_launching = True
+            self._update_erp_controls()
+            start_debug_edge()
+            self.log("已启动专用 Edge，请在新窗口完成 ERP 登录")
             self._set_status("待登录", "running", "请在专用 Edge 中完成 ERP 登录")
-            QMessageBox.information(self, "登录 ERP", message)
+            QMessageBox.information(
+                self,
+                "登录 ERP",
+                "专用 Edge 已启动，请在新窗口完成 ERP 登录。登录完成后点击“开始提取”。",
+            )
         except Exception as exc:
+            self.erp_launching = False
             self.log(f"启动专用 Edge 失败: {exc}")
             self._set_status("启动失败", "error", "请检查 Microsoft Edge 是否已安装")
+            self._update_erp_controls()
             QMessageBox.critical(self, "无法启动 Edge", str(exc))
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         for control in self.task_controls:
             control.setEnabled(enabled)
         self._update_output_controls()
+        self._update_erp_controls()
 
     def set_categories(self, enabled: bool) -> None:
         for check in [*self.category_checks.values(), *self.form_checks.values()]:
@@ -2366,7 +2431,10 @@ class App(QMainWindow):
         if save_pdfs and not pdf_dir_text:
             QMessageBox.warning(self, "输出设置不完整", "请先选择 PDF 输出目录")
             return
-        if not debug_port_available():
+        if not self.erp_open or not debug_port_available():
+            self.erp_open = False
+            self.erp_launching = False
+            self._update_erp_controls()
             message = "请先点击“登录 ERP”，在专用 Edge 中完成登录后再开始提取。"
             self.log(message)
             self._set_status("未登录", "error", message)
@@ -2440,6 +2508,7 @@ class App(QMainWindow):
     @Slot(str, str)
     def _task_failed(self, kind: str, message: str) -> None:
         if kind == "login":
+            self.erp_open = debug_port_available()
             self._set_status("需要登录", "running", "请在专用 Edge 中完成 ERP 登录")
             QMessageBox.information(self, "请先登录 ERP", message)
         else:
@@ -2449,9 +2518,12 @@ class App(QMainWindow):
     @Slot()
     def _thread_finished(self) -> None:
         self.running = False
+        self.erp_open = debug_port_available()
+        self.erp_launching = False
         self.progress.setVisible(False)
         self.start_button.setText("开始提取")
         self._set_controls_enabled(True)
+        self._refresh_erp_state()
         self.worker = None
         self.thread = None
 
