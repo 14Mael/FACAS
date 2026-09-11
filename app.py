@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollBar,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -141,6 +142,34 @@ class DateEdit(QDateEdit):
         painter.drawLine(icon_left, icon_top + 4, icon_left + 14, icon_top + 4)
         painter.drawLine(icon_left + 4, icon_top - 2, icon_left + 4, icon_top + 2)
         painter.drawLine(icon_left + 10, icon_top - 2, icon_left + 10, icon_top + 2)
+
+
+class LogScrollBar(QScrollBar):
+    """日志区域专用滚动条，统一绘制上下按钮，避免系统主题覆盖箭头图层。"""
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if self.orientation() != Qt.Orientation.Vertical or self.height() < 36:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        button_height = 14
+        button_color = QColor("#dcebf7")
+        button_border = QColor("#c7dceb")
+        arrow_color = QColor("#4f7fa2")
+        width = self.width()
+        painter.setPen(QPen(button_border, 1))
+        painter.setBrush(button_color)
+        painter.drawRoundedRect(1, 1, width - 2, button_height, 4, 4)
+        painter.drawRoundedRect(1, self.height() - button_height - 1, width - 2, button_height, 4, 4)
+        painter.setPen(QPen(arrow_color, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        center_x = width // 2
+        top_center = button_height // 2
+        bottom_center = self.height() - button_height // 2 - 1
+        painter.drawLine(center_x - 3, top_center + 1, center_x, top_center - 2)
+        painter.drawLine(center_x, top_center - 2, center_x + 3, top_center + 1)
+        painter.drawLine(center_x - 3, bottom_center - 1, center_x, bottom_center + 2)
+        painter.drawLine(center_x, bottom_center + 2, center_x + 3, bottom_center - 1)
 
 
 def clean(value: str) -> str:
@@ -1885,14 +1914,55 @@ QPlainTextEdit#logView {
 }
 QScrollBar:vertical {
     background: #e6f0fa;
-    width: 10px;
-    margin: 2px;
-    border-radius: 5px;
+    width: 12px;
+    margin: 0px;
+    border: 1px solid #c7dceb;
+    border-radius: 6px;
+}
+QScrollBar::sub-line:vertical,
+QScrollBar::add-line:vertical {
+    background: #dcebf7;
+    height: 14px;
+    subcontrol-origin: margin;
+    border: 1px solid #c7dceb;
+}
+QScrollBar::sub-line:vertical {
+    subcontrol-position: top;
+    border-bottom: none;
+    border-top-left-radius: 5px;
+    border-top-right-radius: 5px;
+}
+QScrollBar::add-line:vertical {
+    subcontrol-position: bottom;
+    border-top: none;
+    border-bottom-left-radius: 5px;
+    border-bottom-right-radius: 5px;
+}
+QScrollBar::up-arrow:vertical,
+QScrollBar::down-arrow:vertical {
+    width: 8px;
+    height: 8px;
+    background: transparent;
+}
+QScrollBar::up-arrow:vertical {
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-bottom: 5px solid #4f7fa2;
+}
+QScrollBar::down-arrow:vertical {
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #4f7fa2;
+}
+QScrollBar::sub-line:vertical:hover,
+QScrollBar::add-line:vertical:hover {
+    background: #cce4f4;
 }
 QScrollBar::handle:vertical {
     background: #8cb9d8;
-    min-height: 28px;
-    border-radius: 5px;
+    min-height: 30px;
+    margin: 1px;
+    border-radius: 4px;
 }
 QScrollBar::handle:vertical:hover {
     background: #5d9bc4;
@@ -2230,6 +2300,7 @@ class App(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
+        self.log_view.setVerticalScrollBar(LogScrollBar(Qt.Orientation.Vertical, self.log_view))
         self.log_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         self.log_view.setMaximumBlockCount(2500)
         self.log_view.setFont(QFont("Cascadia Mono", 9))
