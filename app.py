@@ -1990,7 +1990,7 @@ class App(QMainWindow):
         self.setObjectName("mainWindow")
         self.setWindowTitle(f"报废汽车财务数据自动化处理 {APP_VERSION}")
         # 固定尺寸，避免复选项、输出路径和日志区在缩放时重新换行。
-        self.setFixedSize(1250, 790)
+        self.setFixedSize(1250, 770)
         self.setStyleSheet(MODERN_STYLE)
 
         self.app_dir = application_dir()
