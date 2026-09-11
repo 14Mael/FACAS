@@ -1626,11 +1626,19 @@ QLabel#fieldLabel {
     font-size: 10px;
     font-weight: 600;
 }
-QLineEdit, QDateEdit {
+QLineEdit {
     background: #ffffff;
     border: 1px solid #bcd2e8;
     border-radius: 10px;
-    padding: 7px 32px 7px 11px;
+    padding: 7px 10px;
+    min-height: 21px;
+    selection-background-color: #b8e4fb;
+}
+QDateEdit {
+    background: #ffffff;
+    border: 1px solid #bcd2e8;
+    border-radius: 10px;
+    padding: 7px 6px 7px 11px;
     min-height: 21px;
     selection-background-color: #b8e4fb;
 }
@@ -1640,6 +1648,13 @@ QLineEdit:focus, QDateEdit:focus {
 QLineEdit:disabled, QDateEdit:disabled {
     background: #eaf1f8;
     color: #91a5b8;
+}
+QDateEdit QLineEdit {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0 2px 0 0;
+    min-height: 0;
 }
 QDateEdit::drop-down {
     subcontrol-origin: padding;
@@ -1884,7 +1899,7 @@ class App(QMainWindow):
         """统一日期输入框和日历弹窗的尺寸、间距与蓝色主题。"""
         control.setCalendarPopup(True)
         control.setDisplayFormat("yyyy-MM-dd")
-        control.setFixedWidth(138)
+        control.setFixedWidth(170)
         control.setMinimumHeight(38)
         control.setFrame(True)
         calendar = control.calendarWidget()
