@@ -14,6 +14,42 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+
+# PySide6 的 Qt DLL 在 PyInstaller 环境中分布在多个目录。
+# 只注册 PySide6 和 shiboken6 自身目录，避免把其他依赖（尤其是
+# Poppler 携带的 icuuc.dll）放到 Qt 的 DLL 搜索路径前面。
+_QT_DLL_HANDLES = []
+
+
+def prepare_frozen_dll_search_path() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    runtime_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    search_dirs = [runtime_root / "PySide6", runtime_root / "shiboken6"]
+
+    # PyInstaller 可能会从其他包的依赖中收集同名 ICU DLL。它们不是
+    # Qt 所需的 ICU 版本，不能把运行根目录加入 DLL 搜索路径，否则会
+    # 在导入 QtCore 时触发 WinError 127。
+    bundled_icu = {"icuuc.dll", "icudt78.dll"}
+    has_conflicting_icu = any((runtime_root / name).is_file() for name in bundled_icu)
+    if not has_conflicting_icu:
+        root_text = str(runtime_root)
+        path_entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+        if root_text not in path_entries:
+            os.environ["PATH"] = os.pathsep.join([root_text, *path_entries])
+
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is not None:
+        for path in search_dirs:
+            if path.is_dir():
+                try:
+                    _QT_DLL_HANDLES.append(add_dll_directory(str(path)))
+                except OSError:
+                    pass
+
+
+prepare_frozen_dll_search_path()
+
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright

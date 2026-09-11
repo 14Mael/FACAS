@@ -19,4 +19,12 @@ build/
 dist/
 build-lean/
 dist-lean/
+build-fixed/
+dist-fixed/
+build-modern/
+dist-modern/
+build-folder/
+dist-folder/
+mei-capture/
 *.spec
+!FACAS.spec
