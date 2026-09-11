@@ -57,6 +57,7 @@ from PySide6.QtCore import QDate, QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCalendarWidget,
     QCheckBox,
     QDateEdit,
     QFileDialog,
@@ -1538,20 +1539,20 @@ class ExtractionWorker(QObject):
 
 MODERN_STYLE = """
 QMainWindow, QWidget#root {
-    background: #f4f7f8;
-    color: #1f2933;
+    background: #edf4fc;
+    color: #17324d;
 }
 QFrame#headerCard {
-    background: #11253d;
-    border: 1px solid #1b3855;
+    background: #0a2948;
+    border: 1px solid #164d78;
     border-radius: 18px;
 }
 QFrame#accentBar {
-    background: #d97706;
+    background: #44c5f4;
     border-radius: 3px;
 }
 QLabel#eyebrow {
-    color: #a7c7c7;
+    color: #8fc7e8;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 1px;
@@ -1562,13 +1563,13 @@ QLabel#pageTitle {
     font-weight: 700;
 }
 QLabel#pageSubtitle {
-    color: #b7c7d5;
+    color: #b9d5ea;
     font-size: 11px;
 }
 QLabel#versionBadge {
-    background: #193b56;
-    color: #d9f3ef;
-    border: 1px solid #37627d;
+    background: #123e65;
+    color: #d9f4ff;
+    border: 1px solid #2b719f;
     border-radius: 9px;
     padding: 5px 10px;
     font-size: 10px;
@@ -1581,110 +1582,123 @@ QLabel#statusChip {
     font-weight: 700;
 }
 QLabel#statusChip[state="ready"] {
-    background: #e2f3ed;
-    color: #0f766e;
+    background: #e3f2ff;
+    color: #1261a0;
 }
 QLabel#statusChip[state="running"] {
-    background: #fff1d6;
-    color: #a15c00;
+    background: #e4f7ff;
+    color: #087eaa;
 }
 QLabel#statusChip[state="success"] {
-    background: #d9f5e7;
+    background: #e1f7ef;
     color: #18794e;
 }
 QLabel#statusChip[state="error"] {
-    background: #fde8e7;
-    color: #b42318;
+    background: #fde8ef;
+    color: #b4235a;
 }
 QFrame#card {
     background: #ffffff;
-    border: 1px solid #d9e1e5;
+    border: 1px solid #cfe0f2;
     border-radius: 14px;
 }
 QFrame#subCard {
-    background: #f7fafb;
-    border: 1px solid #e1e8eb;
+    background: #f4f8fd;
+    border: 1px solid #d8e6f5;
     border-radius: 10px;
 }
 QLabel#cardTitle {
-    color: #1f2933;
+    color: #17324d;
     font-size: 12px;
     font-weight: 700;
 }
 QLabel#cardHint {
-    color: #7a8791;
+    color: #6e8499;
     font-size: 10px;
 }
 QLabel#subTitle {
-    color: #40505c;
+    color: #2e587b;
     font-size: 10px;
     font-weight: 700;
 }
 QLabel#fieldLabel {
-    color: #66737e;
+    color: #54708a;
     font-size: 10px;
     font-weight: 600;
 }
 QLineEdit, QDateEdit {
     background: #ffffff;
-    border: 1px solid #cbd5dc;
-    border-radius: 8px;
-    padding: 7px 10px;
-    min-height: 19px;
-    selection-background-color: #b9e4dc;
+    border: 1px solid #bcd2e8;
+    border-radius: 10px;
+    padding: 7px 32px 7px 11px;
+    min-height: 21px;
+    selection-background-color: #b8e4fb;
 }
 QLineEdit:focus, QDateEdit:focus {
-    border: 1px solid #0f766e;
+    border: 1px solid #2589c7;
 }
 QLineEdit:disabled, QDateEdit:disabled {
-    background: #edf1f3;
-    color: #98a4ad;
+    background: #eaf1f8;
+    color: #91a5b8;
+}
+QDateEdit::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 29px;
+    border: none;
+    margin: 1px;
+    border-top-right-radius: 9px;
+    border-bottom-right-radius: 9px;
+    background: transparent;
+}
+QDateEdit::drop-down:hover {
+    background: #e0f1fc;
 }
 QCheckBox {
-    color: #34424d;
+    color: #294863;
     spacing: 8px;
     padding: 3px 0;
 }
 QCheckBox:checked {
-    color: #0f766e;
+    color: #1261a0;
     font-weight: 700;
 }
 QCheckBox::indicator {
     width: 17px;
     height: 17px;
-    border: 1px solid #b7c5cc;
+    border: 1px solid #a9c4dc;
     border-radius: 5px;
     background: #ffffff;
 }
 QCheckBox::indicator:hover {
-    border: 1px solid #0f766e;
+    border: 1px solid #2589c7;
 }
 QCheckBox::indicator:checked {
-    background: #0f766e;
-    border: 1px solid #0f766e;
+    background: #1676b8;
+    border: 1px solid #1676b8;
 }
 QPushButton {
-    border: 1px solid #cbd5dc;
+    border: 1px solid #bcd2e8;
     border-radius: 8px;
     background: #ffffff;
-    color: #40505c;
+    color: #2e587b;
     padding: 7px 12px;
     font-weight: 600;
 }
 QPushButton:hover {
-    background: #eef6f5;
-    border-color: #83bdb4;
+    background: #edf7ff;
+    border-color: #75b8df;
 }
 QPushButton:pressed {
-    background: #dceeea;
+    background: #d9effc;
 }
 QPushButton:disabled {
-    background: #edf1f3;
-    color: #9aa5ad;
-    border-color: #dfe5e8;
+    background: #eaf1f8;
+    color: #91a5b8;
+    border-color: #d9e5f0;
 }
 QPushButton#primaryButton {
-    background: #0f766e;
+    background: #1267a8;
     color: #ffffff;
     border: none;
     border-radius: 10px;
@@ -1693,40 +1707,123 @@ QPushButton#primaryButton {
     font-weight: 700;
 }
 QPushButton#primaryButton:hover {
-    background: #115e59;
+    background: #0e5590;
 }
 QPushButton#primaryButton:pressed {
-    background: #0b4f4a;
+    background: #0a416e;
 }
 QPushButton#primaryButton:disabled {
-    background: #9ac8c2;
-    color: #eaf7f5;
+    background: #86b8d7;
+    color: #eaf7ff;
 }
 QPushButton#quietButton {
-    background: #edf3f4;
-    border: 1px solid #d6e1e3;
-    color: #52616b;
+    background: #edf5fc;
+    border: 1px solid #d0e2f3;
+    color: #3d6687;
     padding: 6px 10px;
     font-size: 10px;
 }
 QPlainTextEdit#logView {
-    background: #17232b;
-    color: #d6f5ef;
-    border: none;
+    background: #0c2137;
+    color: #c9eeff;
+    border: 1px solid #17496d;
     border-radius: 10px;
     padding: 12px;
-    selection-background-color: #24545a;
+    selection-background-color: #15527b;
+}
+QScrollBar:vertical {
+    background: #e6f0fa;
+    width: 10px;
+    margin: 2px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical {
+    background: #8cb9d8;
+    min-height: 28px;
+    border-radius: 5px;
+}
+QScrollBar::handle:vertical:hover {
+    background: #5d9bc4;
 }
 QProgressBar {
     border: none;
-    background: #e2ecec;
+    background: #dcebf8;
     border-radius: 3px;
     min-height: 6px;
     max-height: 6px;
 }
 QProgressBar::chunk {
-    background: #0f766e;
+    background: #27a8df;
     border-radius: 3px;
+}
+"""
+
+
+DATE_CALENDAR_STYLE = """
+QCalendarWidget {
+    background: #ffffff;
+    color: #173b5f;
+    border: 1px solid #9fc4e2;
+    border-radius: 12px;
+}
+QCalendarWidget QWidget#qt_calendar_navigationbar {
+    background: #eaf4ff;
+    border-bottom: 1px solid #c9dff2;
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+    padding: 5px;
+}
+QCalendarWidget QToolButton {
+    color: #174d7d;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-weight: 700;
+}
+QCalendarWidget QToolButton:hover {
+    background: #dbeeff;
+    color: #0b63ae;
+}
+QCalendarWidget QToolButton:pressed {
+    background: #c7e5fb;
+}
+QCalendarWidget QSpinBox {
+    color: #173b5f;
+    background: #ffffff;
+    border: 1px solid #b8d4eb;
+    border-radius: 5px;
+    padding: 2px 5px;
+}
+QCalendarWidget QSpinBox::up-button,
+QCalendarWidget QSpinBox::down-button {
+    width: 14px;
+    border: none;
+    background: transparent;
+}
+QCalendarWidget QAbstractItemView {
+    background: #ffffff;
+    alternate-background-color: #eef6fd;
+    color: #244967;
+    selection-background-color: #2184c1;
+    selection-color: #ffffff;
+    outline: none;
+    border: none;
+    padding: 6px;
+}
+QCalendarWidget QAbstractItemView::item:selected {
+    background: #2184c1;
+    color: #ffffff;
+    border-radius: 8px;
+}
+QCalendarWidget QAbstractItemView::item:hover {
+    background: #d9effc;
+    color: #0d4d7d;
+}
+QCalendarWidget QMenu {
+    background: #ffffff;
+    color: #173b5f;
+    border: 1px solid #b8d4eb;
 }
 """
 
@@ -1781,6 +1878,23 @@ class App(QMainWindow):
         label = QLabel(text)
         label.setObjectName("fieldLabel")
         return label
+
+    @staticmethod
+    def _configure_date_edit(control: QDateEdit) -> None:
+        """统一日期输入框和日历弹窗的尺寸、间距与蓝色主题。"""
+        control.setCalendarPopup(True)
+        control.setDisplayFormat("yyyy-MM-dd")
+        control.setFixedWidth(138)
+        control.setMinimumHeight(38)
+        control.setFrame(True)
+        calendar = control.calendarWidget()
+        calendar.setObjectName("dateCalendar")
+        calendar.setStyleSheet(DATE_CALENDAR_STYLE)
+        calendar.setGridVisible(False)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
+        calendar.setMinimumSize(318, 248)
+        calendar.setFont(QFont("Microsoft YaHei UI", 10))
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -1840,16 +1954,12 @@ class App(QMainWindow):
         date_row.setSpacing(8)
         date_row.addWidget(self._field_label("开始日期"))
         self.start_date = QDateEdit(QDate.currentDate())
-        self.start_date.setCalendarPopup(True)
-        self.start_date.setDisplayFormat("yyyy-MM-dd")
-        self.start_date.setFixedWidth(138)
+        self._configure_date_edit(self.start_date)
         date_row.addWidget(self.start_date)
         date_row.addSpacing(12)
         date_row.addWidget(self._field_label("结束日期"))
         self.end_date = QDateEdit(QDate.currentDate())
-        self.end_date.setCalendarPopup(True)
-        self.end_date.setDisplayFormat("yyyy-MM-dd")
-        self.end_date.setFixedWidth(138)
+        self._configure_date_edit(self.end_date)
         date_row.addWidget(self.end_date)
         date_row.addStretch(1)
         query_layout.addLayout(date_row)
