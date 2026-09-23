@@ -94,7 +94,7 @@ FORM_MODULES = {
 
 ERP_URL = "https://erp.bfcgj.com/module.jsp?module=desk_main"
 DEBUG_PORT = 9222
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v1.0.1"
 
 
 def application_dir() -> Path:
