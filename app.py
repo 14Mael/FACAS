@@ -2422,7 +2422,8 @@ class App(QMainWindow):
     def open_bank_entry(self) -> None:
         """打开银行流水处理和 ERP 凭证录入界面。"""
         if self.bank_window is None:
-            self.bank_window = BankEntryWindow(self)
+            # 使用独立顶层窗体，避免 Windows 将其作为主窗口的附属窗体处理最小化状态。
+            self.bank_window = BankEntryWindow()
             self.bank_window.bank_task_started.connect(self._bank_task_started)
             self.bank_window.bank_task_finished.connect(self._bank_task_finished)
         self.bank_window.set_external_busy(self.running or self.bank_task_running)
@@ -2741,6 +2742,8 @@ class App(QMainWindow):
             QMessageBox.warning(self, "任务进行中", "当前任务仍在运行，请等待任务完成后再关闭窗口")
             event.ignore()
             return
+        if self.bank_window is not None:
+            self.bank_window.close()
         if hasattr(self, "erp_state_timer"):
             self.erp_state_timer.stop()
         if hasattr(self, "erp_probe_thread") and self.erp_probe_thread.isRunning():
