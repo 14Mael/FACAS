@@ -77,6 +77,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bank_entry import MainWindow as BankEntryWindow
+
 
 MODULES = {
     "现场销售": "bfc_sale_local_desk",
@@ -2070,8 +2072,10 @@ class App(QMainWindow):
         self.settings_path = self.app_dir / "facas-settings.json"
         self.log_dir = self.app_dir / "log"
         self.running = False
+        self.bank_task_running = False
         self.erp_open = False
         self.erp_launching = False
+        self.bank_window: BankEntryWindow | None = None
         self.thread: QThread | None = None
         self.worker: ExtractionWorker | None = None
 
@@ -2333,6 +2337,11 @@ class App(QMainWindow):
         self.login_button.setMinimumWidth(120)
         self.login_button.clicked.connect(self.login_erp)
         action_layout.addWidget(self.login_button)
+        self.bank_button = QPushButton("银行流水录入")
+        self.bank_button.setObjectName("secondaryButton")
+        self.bank_button.setMinimumWidth(126)
+        self.bank_button.clicked.connect(self.open_bank_entry)
+        action_layout.addWidget(self.bank_button)
         self.start_button = QPushButton("开始提取")
         self.start_button.setObjectName("primaryButton")
         self.start_button.setMinimumWidth(140)
@@ -2355,6 +2364,7 @@ class App(QMainWindow):
             self.select_all_button,
             self.clear_all_button,
             self.login_button,
+            self.bank_button,
             self.start_button,
         ]
 
@@ -2393,20 +2403,54 @@ class App(QMainWindow):
     def _update_output_controls(self) -> None:
         excel_enabled = self.save_excel.isChecked()
         pdf_enabled = self.save_pdfs.isChecked()
-        self.output_edit.setEnabled(excel_enabled and not self.running)
-        self.output_browse.setEnabled(excel_enabled and not self.running)
-        self.pdf_dir_edit.setEnabled(pdf_enabled and not self.running)
-        self.pdf_browse.setEnabled(pdf_enabled and not self.running)
-        self.pdf_a5_landscape.setEnabled(pdf_enabled and not self.running)
+        busy = self.running or self.bank_task_running
+        self.output_edit.setEnabled(excel_enabled and not busy)
+        self.output_browse.setEnabled(excel_enabled and not busy)
+        self.pdf_dir_edit.setEnabled(pdf_enabled and not busy)
+        self.pdf_browse.setEnabled(pdf_enabled and not busy)
+        self.pdf_a5_landscape.setEnabled(pdf_enabled and not busy)
+
+    def open_bank_entry(self) -> None:
+        """打开银行流水处理和 ERP 凭证录入界面。"""
+        if self.bank_window is None:
+            self.bank_window = BankEntryWindow(self)
+            self.bank_window.bank_task_started.connect(self._bank_task_started)
+            self.bank_window.bank_task_finished.connect(self._bank_task_finished)
+        self.bank_window.set_external_busy(self.running or self.bank_task_running)
+        self.bank_window.show()
+        self.bank_window.raise_()
+        self.bank_window.activateWindow()
+
+    @Slot()
+    def _bank_task_started(self) -> None:
+        self.bank_task_running = True
+        self._set_controls_enabled(False)
+        self._set_status("运行中", "running", "银行流水任务正在执行…")
+        self.log("银行流水任务已启动")
+
+    @Slot(str)
+    def _bank_task_finished(self, outcome: str) -> None:
+        self.bank_task_running = False
+        self._set_controls_enabled(True)
+        if outcome == "success":
+            self._set_status("已完成", "success", "银行流水任务已完成")
+        elif outcome == "partial":
+            self._set_status("部分失败", "error", "部分凭证未录入，请查看银行窗口日志")
+        else:
+            self._set_status("执行失败", "error", "银行流水任务失败，请查看银行窗口日志")
+        self.log(f"银行流水任务结果：{outcome}")
+        self._refresh_erp_state()
 
     def _update_erp_controls(self) -> None:
         """根据专用 Edge 状态统一锁定登录和提取按钮。"""
         if not hasattr(self, "login_button"):
             return
-        if self.running:
+        if self.running or self.bank_task_running:
             self.login_button.setEnabled(False)
             self.start_button.setEnabled(False)
+            self.bank_button.setEnabled(False)
             return
+        self.bank_button.setEnabled(True)
         self.login_button.setEnabled(not self.erp_open and not self.erp_launching)
         self.start_button.setEnabled(self.erp_open)
 
@@ -2421,16 +2465,16 @@ class App(QMainWindow):
             self.erp_open = current
             if current:
                 self.erp_launching = False
-                if not self.running:
+                if not self.running and not self.bank_task_running:
                     self._set_status("ERP 已连接", "ready", "可以开始提取")
-            elif not self.running:
+            elif not self.running and not self.bank_task_running:
                 self.erp_launching = False
                 self._set_status("待登录", "ready", "请先点击“登录 ERP”")
         self._update_erp_controls()
 
     def login_erp(self) -> None:
         """启动专用 Edge，让用户先完成 ERP 登录。"""
-        if self.running or self.erp_launching:
+        if self.running or self.bank_task_running or self.erp_launching:
             return
         if self.erp_open:
             self.erp_open = True
@@ -2459,6 +2503,8 @@ class App(QMainWindow):
     def _set_controls_enabled(self, enabled: bool) -> None:
         for control in self.task_controls:
             control.setEnabled(enabled)
+        if self.bank_window is not None:
+            self.bank_window.set_external_busy(not enabled or self.bank_task_running)
         self._update_output_controls()
         self._update_erp_controls()
 
@@ -2565,7 +2611,7 @@ class App(QMainWindow):
             self.task_status.setText(detail)
 
     def start_run(self) -> None:
-        if self.running:
+        if self.running or self.bank_task_running:
             return
         selected = [name for name, check in self.category_checks.items() if check.isChecked()]
         selected_forms = [name for name, check in self.form_checks.items() if check.isChecked()]
@@ -2682,7 +2728,7 @@ class App(QMainWindow):
         self.thread = None
 
     def closeEvent(self, event) -> None:
-        if self.running:
+        if self.running or self.bank_task_running:
             QMessageBox.warning(self, "任务进行中", "当前任务仍在运行，请等待任务完成后再关闭窗口")
             event.ignore()
             return

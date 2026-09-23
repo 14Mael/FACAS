@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from jn.process_bank import match_payment_bills
+from bank_entry import match_payment_bills
 
 
 class PaymentMatchingTests(unittest.TestCase):

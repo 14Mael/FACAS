@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 .facas-edge-profile/
+jn/
+bank-entry-settings.json
+bank-entry-error.log
 
 # Local runtime state and generated output
 facas-run.log

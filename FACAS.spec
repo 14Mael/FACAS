@@ -8,11 +8,17 @@ from PyInstaller.utils.hooks import collect_all
 # Playwright 的 Python 运行时和 openpyxl 的资源需要显式收集。
 playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all("playwright")
 openpyxl_datas, openpyxl_binaries, openpyxl_hiddenimports = collect_all("openpyxl")
+xlrd_datas, xlrd_binaries, xlrd_hiddenimports = collect_all("xlrd")
 
 
-datas = [*playwright_datas, *openpyxl_datas]
-binaries = [*playwright_binaries, *openpyxl_binaries]
-hiddenimports = [*playwright_hiddenimports, *openpyxl_hiddenimports]
+datas = [*playwright_datas, *openpyxl_datas, *xlrd_datas]
+binaries = [*playwright_binaries, *openpyxl_binaries, *xlrd_binaries]
+hiddenimports = [
+    *playwright_hiddenimports,
+    *openpyxl_hiddenimports,
+    *xlrd_hiddenimports,
+    "bank_entry",
+]
 
 # 程序只使用 QtCore、QtGui、QtWidgets；其余 Qt 模块由官方 hook 自动收集，
 # 会显著增加体积，但不会参与本项目的界面、Excel 或 PDF 流程。
