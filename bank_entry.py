@@ -1198,7 +1198,14 @@ class MainWindow(QWidget):
         self.setObjectName("root")
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(760, 640)
-        self.setWindowFlag(Qt.WindowType.Window, True)
+        # 明确使用普通顶层窗体标志，确保 Windows 将最小化按钮识别为真正的最小化。
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
 
         self.config = load_config()
         self.output_dir = self.config.get("output_dir", "")
@@ -1230,28 +1237,30 @@ class MainWindow(QWidget):
         # ---- 顶部深蓝卡片 ----
         header = QFrame()
         header.setObjectName("headerCard")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(18, 16, 18, 16)
-        header_layout.setSpacing(6)
-
-        top_row = QHBoxLayout()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 18, 20, 18)
+        header_layout.setSpacing(14)
         accent = QFrame()
         accent.setObjectName("accentBar")
-        accent.setFixedSize(26, 3)
+        accent.setFixedWidth(5)
+        accent.setMinimumHeight(68)
+        header_layout.addWidget(accent)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(4)
         eyebrow = QLabel("银行流水 · 凭证处理")
         eyebrow.setObjectName("eyebrow")
-        top_row.addWidget(accent)
-        top_row.addWidget(eyebrow)
-        top_row.addStretch(1)
-        header_layout.addLayout(top_row)
+        title_box.addWidget(eyebrow)
 
         title = QLabel("银行流水凭证录入工具")
         title.setObjectName("pageTitle")
-        header_layout.addWidget(title)
+        title_box.addWidget(title)
 
         subtitle = QLabel("读取 Excel · 判断方向 · 生成摘要 · 自动录入 ERP")
         subtitle.setObjectName("pageSubtitle")
-        header_layout.addWidget(subtitle)
+        title_box.addWidget(subtitle)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch(1)
         main_layout.addWidget(header)
 
         # ---- 源文件卡片 ----

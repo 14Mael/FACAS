@@ -1787,6 +1787,8 @@ QDateEdit {
     border-radius: 10px;
     padding: 7px 6px 7px 11px;
     min-height: 21px;
+    color: #17324d;
+    font-size: 11px;
     selection-background-color: #b8e4fb;
 }
 QLineEdit:focus, QDateEdit:focus {
@@ -1802,6 +1804,8 @@ QDateEdit QLineEdit {
     border-radius: 0;
     padding: 0 2px 0 0;
     min-height: 0;
+    color: #17324d;
+    font-size: 11px;
 }
 QDateEdit::drop-down {
     subcontrol-origin: padding;
@@ -2127,12 +2131,17 @@ class App(QMainWindow):
 
     @staticmethod
     def _configure_date_edit(control: QDateEdit) -> None:
-        """统一日期输入框和日历弹窗的尺寸、间距与蓝色主题。"""
+        """统一日期输入框字体、尺寸、间距与蓝色主题。"""
         control.setCalendarPopup(True)
         control.setDisplayFormat("yyyy-MM-dd")
-        control.setFixedWidth(170)
-        control.setMinimumHeight(38)
+        control.setFixedWidth(184)
+        control.setMinimumHeight(40)
         control.setFrame(True)
+        # 部分 Windows 电脑的系统字体或缩放比例不同，显式同步编辑框字体并留足显示宽度。
+        control.setFont(QApplication.font())
+        editor = control.lineEdit()
+        editor.setFont(QApplication.font())
+        editor.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         calendar = control.calendarWidget()
         calendar.setObjectName("dateCalendar")
         calendar.setStyleSheet(DATE_CALENDAR_STYLE)
